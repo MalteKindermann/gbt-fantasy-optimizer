@@ -394,12 +394,11 @@ gcloud run services replace svc.yaml --region=us-central1
 ```
 Subsequent `gcloud run deploy --source .` re-builds the image without touching the volume — once attached, it stays. To set `CORS_ALLOW_ORIGIN` later (once the Vercel domain is known): `gcloud run services update gbt-fantasy-optimizer --region=us-central1 --update-env-vars CORS_ALLOW_ORIGIN=https://<your>.vercel.app`.
 
-**Vercel**: connect the repo with **Branch = `cloud-deploy`**, no build command, output dir empty. On `cloud-deploy`, edit `config.js` to hold the Cloud Run URL + Supabase URL + anon key, commit, push. Vercel deploys automatically.
+**Vercel**: project is wired to the `main` branch with `vercel.json`'s `buildCommand` = `node scripts/generate-config.js`. Set the three required env vars (`API_BASE`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`) once in Vercel Settings → Environment Variables. Every push to `main` rebuilds the static site with fresh values injected into `config.js`. No real secrets ever land in git.
 
-Self-Host users only ever pull `main`, which keeps `config.js` empty — so a fresh clone can never accidentally point at the cloud instance.
+Self-Host users clone `main`, see the empty committed `config.js`, and run `python scripts/serve.py` — the build script is never executed locally, so the app boots without auth and without trying to call any cloud backend.
 
 ## Repo & branches
 
-- `main` — primary working branch. `config.js` here always has **empty** defaults (Self-Host mode).
-- `cloud-deploy` — Cloud Run / Vercel deployment branch. Holds the `Dockerfile`, `.dockerignore`, `vercel.json`, and the **filled-in** `config.js` with real Cloud Run + Supabase URLs. Updates land here via `git checkout cloud-deploy && git merge main` (resolve the `config.js` conflict in favor of the cloud values).
-- History has been rewritten with `git filter-repo` to scrub stale `data/*.json` snapshots. If you ever need to do another scrub, the executable is at `~/AppData/Roaming/Python/Python311/Scripts/git-filter-repo.exe` (Windows install via `pip install --user git-filter-repo`).
+- `main` — **single source of truth**. Watched by both Vercel (frontend) and Cloud Build (Docker image → Cloud Run). Holds all code including deploy-adjacent files (`Dockerfile`, `cloudbuild.yaml`, `vercel.json`, `scripts/generate-config.js`) — these are harmless for self-host users since they only activate when Docker/Vercel/Cloud Build are watching. `config.js` is committed with empty defaults; real values come from Vercel env vars at build time.
+- History has been rewritten with `git filter-repo` to scrub stale `data/*.json` snapshots and leaked deploy URLs. If you ever need to do another scrub, the executable is at `~/AppData/Roaming/Python/Python311/Scripts/git-filter-repo.exe` (Windows install via `pip install --user git-filter-repo`).
