@@ -43,6 +43,22 @@ def _resolve_port() -> int:
 PORT = _resolve_port()
 
 
+def _ensure_runtime_stubs() -> None:
+    """
+    Create empty stub data files at startup if missing so the frontend
+    (which fetches them directly) never sees a 404 on first launch.
+    Real content is populated by the first sim / Firestore-sync run.
+    """
+    if not PLAYERS_AVL.exists():
+        PLAYERS_AVL.parent.mkdir(parents=True, exist_ok=True)
+        with open(PLAYERS_AVL, "w", encoding="utf-8") as f:
+            f.write("[]\n")
+        print(f"  Created empty {PLAYERS_AVL.name} stub.")
+
+
+_ensure_runtime_stubs()
+
+
 # Single-flight: never run two simulations at once
 _sim_lock = threading.Lock()
 

@@ -4,6 +4,15 @@ data/firebase_auth.json
 .env.local
 .env.*.local
 
+# Personal / user-specific data — every user has their own state.
+# These get auto-generated from Firestore + DVV scrapes on first run.
+# (data/players_all.json IS tracked — it's the curated historical roster.)
+data/players_available.json
+data/players_season.json
+data/tournament_sim.json
+data/bracket_m.json
+data/bracket_f.json
+
 # Disk caches (DVV / GBT bracket / H2H / Firestore-Snapshot)
 data/.cache/
 
