@@ -41,6 +41,7 @@ Public API
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -48,9 +49,14 @@ from typing import Any
 
 import requests
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# Shared env/dotenv loader + data-dir resolver
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_dotenv_files, data_dir
+load_dotenv_files()
+
+# ── Paths (env-aware) ─────────────────────────────────────────────────────────
 ROOT       = Path(__file__).resolve().parent.parent
-DATA_DIR   = ROOT / "data"
+DATA_DIR   = data_dir()
 AUTH_FILE  = DATA_DIR / "firebase_auth.json"
 CACHE_DIR  = DATA_DIR / ".cache"
 CACHE_FILE = CACHE_DIR / "firestore_season.json"
@@ -71,18 +77,30 @@ _id_token_cache: dict[str, Any] = {"token": None, "expires_at": 0}
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 
 def _load_auth() -> dict | None:
-    """Liest data/firebase_auth.json. Returnt None wenn nicht da."""
-    if not AUTH_FILE.exists():
-        return None
-    try:
-        with open(AUTH_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        if not data.get("apiKey") or not data.get("refreshToken"):
-            return None
-        return data
-    except Exception as e:
-        print(f"  WARNING: konnte {AUTH_FILE} nicht lesen: {e}", file=sys.stderr)
-        return None
+    """
+    Auth-Reihenfolge (höchste Priorität zuerst):
+      1. ENV-Variablen FIREBASE_API_KEY + FIREBASE_REFRESH_TOKEN
+         (Production-Setup: Fly.io secrets, Docker --env, .env.local)
+      2. Datei data/firebase_auth.json
+         (Legacy lokales Setup — bleibt unterstützt, damit alte Setups
+         weiter funktionieren)
+    Returnt None wenn nichts gefunden.
+    """
+    env_key   = os.environ.get("FIREBASE_API_KEY", "").strip()
+    env_token = os.environ.get("FIREBASE_REFRESH_TOKEN", "").strip()
+    if env_key and env_token:
+        return {"apiKey": env_key, "refreshToken": env_token, "_source": "env"}
+
+    if AUTH_FILE.exists():
+        try:
+            with open(AUTH_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("apiKey") and data.get("refreshToken"):
+                data["_source"] = "file"
+                return data
+        except Exception as e:
+            print(f"  WARNING: konnte {AUTH_FILE} nicht lesen: {e}", file=sys.stderr)
+    return None
 
 
 def _refresh_id_token(api_key: str, refresh_token: str) -> str:

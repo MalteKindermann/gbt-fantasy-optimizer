@@ -32,13 +32,18 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ── Paths (env-aware via scripts/_env.py) ─────────────────────────────────────
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_dotenv_files, data_dir  # noqa: E402
+load_dotenv_files()
 
 ROOT        = Path(__file__).resolve().parent.parent
-PLAYERS_ALL = ROOT / "data" / "players_all.json"
-PLAYERS_AVL = ROOT / "data" / "players_available.json"
-SIM_OUTPUT  = ROOT / "data" / "tournament_sim.json"
-CACHE_DIR   = ROOT / "data" / ".cache"
+DATA_DIR    = data_dir()
+PLAYERS_ALL = DATA_DIR / "players_all.json"
+PLAYERS_AVL = DATA_DIR / "players_available.json"
+SIM_OUTPUT  = DATA_DIR / "tournament_sim.json"
+CACHE_DIR   = DATA_DIR / ".cache"
 
 CACHE_TTL_SECONDS = 3600  # 1 hour
 

@@ -38,8 +38,12 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_dotenv_files, data_dir  # noqa: E402
+load_dotenv_files()
+
 ROOT      = Path(__file__).resolve().parent.parent
-CACHE_DIR = ROOT / "data" / ".cache"
+CACHE_DIR = data_dir() / ".cache"
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 BASE_URL    = "https://beach.volleyball-verband.de/public"

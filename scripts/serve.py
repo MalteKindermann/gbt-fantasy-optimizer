@@ -15,6 +15,7 @@ Static files are served from the repo root (one level up from this file).
 
 import http.server
 import json
+import os
 import socketserver
 import sys
 import threading
@@ -24,12 +25,22 @@ from pathlib import Path
 
 # Allow importing from same directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _env import load_dotenv_files  # noqa: E402
+load_dotenv_files()
 from simulate_tournament import (
-    run_simulation, SIM_OUTPUT, players_available_hash
+    run_simulation, SIM_OUTPUT, PLAYERS_AVL, players_available_hash
 )
 
 ROOT = Path(__file__).resolve().parent.parent
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+# Port resolution (CLI arg → env → default). Fly.io sets $PORT to 8080.
+def _resolve_port() -> int:
+    if len(sys.argv) > 1 and sys.argv[1].isdigit():
+        return int(sys.argv[1])
+    env_p = os.environ.get("PORT", "").strip()
+    if env_p.isdigit():
+        return int(env_p)
+    return 8000
+PORT = _resolve_port()
 
 
 # Single-flight: never run two simulations at once
@@ -122,7 +133,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(400, {"error": f"invalid body: {e}"})
                 return
 
-            avl_file = ROOT / "data" / "players_available.json"
+            avl_file = PLAYERS_AVL
             try:
                 with open(avl_file, encoding="utf-8") as f:
                     entries = json.load(f)
@@ -155,7 +166,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(400, {"error": f"invalid body: {e}"})
                 return
 
-            avl_file = ROOT / "data" / "players_available.json"
+            avl_file = PLAYERS_AVL
             try:
                 with open(avl_file, encoding="utf-8") as f:
                     entries = json.load(f)

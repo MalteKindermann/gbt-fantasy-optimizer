@@ -1,5 +1,8 @@
-# Firebase auth — contains a long-lived refresh token. NEVER commit.
+# Secrets — refresh tokens, API keys etc. NEVER commit.
 data/firebase_auth.json
+.env
+.env.local
+.env.*.local
 
 # Disk caches (DVV / GBT bracket / H2H / Firestore-Snapshot)
 data/.cache/
