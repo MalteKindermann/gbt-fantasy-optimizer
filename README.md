@@ -1,154 +1,56 @@
-# 🏐 GBT Fantasy Team Optimizer
+# 🏐 GBT Fantasy Optimizer
 
-Statistisch optimales Team-Tool für die German Beach Tour 2025 Fantasy Liga.
+Ein Tool, das ein statistisch optimales Fantasy-Team für die [German Beach Tour](https://gbt-fantasy.web.app/) berechnet — basierend auf Spieler-Stats, aktueller DVV-Rangliste, Head-to-Head-Bilanzen und Live-Bracket-Daten des nächsten Turniers.
 
-## 🚀 Installation
+## Features
 
-### Schnellstart (einfach öffnen)
-1. Lade alle Dateien herunter
-2. Öffne `index.html` direkt im Browser
-3. Fertig! Keine Installation notwendig.
+- **Mehrere Optimierungs-Algorithmen** parallel — reines Punktemaximum, konsistente Performer (Bayes-Shrinkage), Turnier-Prognose (Monte-Carlo), Final-Fokus
+- **Kapitän-Logik** (1.5× Punkte) wird im Solver mitberechnet
+- **Picks & Bans**: einzelne Spieler erzwingen oder ausschließen, alle Algorithmen respektieren das
+- **Turnier-Bracket-Vorhersage** über DVV-Setzliste + Head-to-Head-Daten, mit manuell anpassbaren Match-Ergebnissen
+- **Auto-Sync** der Preise aus dem offiziellen Fantasy-Backend (Firestore)
+- **Vergleichs-Tab** zeigt alle Algorithmus-Ergebnisse nebeneinander
 
-### Mit lokalem Server (empfohlen für Entwicklung)
+## Selbst hosten
+
+Voraussetzung: Python 3.10+.
+
 ```bash
-# Python 3
-python -m http.server 8000
-
-# Node.js
-npx serve
-
-# PHP
-php -S localhost:8000
+git clone https://github.com/MalteKindermann/gbt-fantasy-optimizer.git
+cd gbt-fantasy-optimizer
+pip install -r scripts/requirements.txt
+python scripts/serve.py
 ```
 
-Dann öffne: `http://localhost:8000`
+Dann im Browser auf <http://localhost:8000>. Kein Login, kein Cloud-Account, nichts.
 
-## 📁 Projektstruktur
+### Optional: Live-Preise und Rookie-Daten
 
-```
-gbt-fantasy-optimizer/
-├── index.html          # Hauptseite (HTML Struktur)
-├── styles.css          # Komplettes Styling
-├── app.js              # Hauptlogik & Optimierungsalgorithmus
-├── data.js             # Spielerdatenbank (hier Preise updaten!)
-└── README.md           # Diese Datei
-```
+Beim ersten Start ist die Spielerliste leer (kein laufendes Turnier registriert). Sobald ein GBT-Turnier ansteht oder läuft, lädt der eingebaute Scraper das Bracket automatisch. Damit auch Preise und neue Spieler aus dem offiziellen [gbt-fantasy.web.app](https://gbt-fantasy.web.app/)-Backend gezogen werden, brauchst du einmal einen Firebase-Refresh-Token:
 
-## ✏️ Spielerdaten aktualisieren
+1. Auf <https://gbt-fantasy.web.app/> mit deinem Google-Account einloggen
+2. Browser-DevTools öffnen (F12) → Console
+3. Inhalt von `fetch_auth_token.txt` einfügen und ausführen — das lädt eine `firebase_auth.json` herunter
+4. Datei nach `data/firebase_auth.json` legen (oder die zwei Werte in eine `.env.local` schreiben, Vorlage in `.env.local.example`)
+5. Server neu starten
 
-Öffne `data.js` und ändere die Werte:
+Ohne diesen Schritt funktioniert das Tool weiterhin — du verlierst nur den automatischen Preis-Sync und kannst Preise stattdessen manuell über den "Preise eintragen"-Dialog setzen.
 
-```javascript
-"Spielername": {
-    coins: 35,           // Preis in Coins
-    pos: "Abwehr",       // Position: "Block", "Abwehr", oder "Hybrid"
-    gender: "W",         // "M" oder "W"
-    tp: 842.9,           // Total Points (Gesamtpunkte)
-    t: 20,               // Anzahl Turniere
-    mp: 60               // Anzahl Matches
-}
-```
+## Wie's funktioniert (Kurz)
 
-### Neue Spieler hinzufügen:
-```javascript
-"Neuer Spieler": {
-    coins: 25,
-    pos: "Block",
-    gender: "M",
-    tp: 450.5,
-    t: 12,
-    mp: 30
-}
-```
+- **Python-Backend** (`scripts/serve.py`) liefert statische Dateien aus und stellt eine kleine JSON-API für Simulation, Sync und Preis-Updates bereit
+- **Frontend** (`index.html` + `app.js` + `styles.css`) ist Vanilla-JS, kein Build-Step
+- **Scraper** holen sich Daten von [beach.volleyball-verband.de](https://beach.volleyball-verband.de/public/) (DVV-Setzliste, Spielplan, Ranglisten) und [gbt.hanski.de](https://gbt.hanski.de/) (H2H-Bilanzen) — alles mit lokalem Disk-Cache, damit man die Quellen nicht hämmert
+- **Monte-Carlo-Simulation** läuft pro Bracket-Position und produziert die `expectedMatches`-Werte, die der "Turnier-Prognose"-Algorithmus nutzt
 
-## 🎮 Features
+Eine ausführliche Architektur-Übersicht inkl. Datenfluss, Algorithmen und Konventionen steht in [`CLAUDE.md`](CLAUDE.md).
 
-### 3 Tabs:
-- **📊 Alle Spieler** - Vollständige Übersicht mit Stats
-- **⭐ Optimales Team** - Automatisch berechnetes bestes Team
-- **💎 Effizienz-Ranking** - Sortiert nach Punkten pro Coin
+## Hosted Version
 
-### Einstellbare Parameter:
-- **Budget** - Maximale Coins (Standard: 240)
-- **Teamgröße** - Anzahl Spieler (Standard: 6)
-- **Max Block** - Max. Block-Spieler (0 = egal)
-- **Max Abwehr** - Max. Abwehr-Spieler (0 = egal)
-- **Filter** - Nach Position oder Gender filtern
+Eine gehostete Variante läuft unter <https://gbt-fantasy-optimizer.vercel.app>. Login ist invite-only — wenn du Zugriff willst, melde dich bei mir.
 
-### Statistiken pro Spieler:
-- Gesamtpunkte
-- Ø pro Turnier
-- Ø pro Match
-- **Effizienz (Punkte/Coin)** ← Wichtigster Wert!
+Die hosted Version teilt sich denselben Code wie die Self-Host-Variante; Cloud-Mode (Frontend auf Vercel, Backend auf Google Cloud Run mit GCS-Volume, Auth via Supabase) aktiviert sich nur wenn Build-Time-Env-Vars gesetzt sind. Für lokale Nutzung ist davon nichts spürbar.
 
-## 🧮 Optimierungsalgorithmus
+## Lizenz
 
-Der Optimizer nutzt einen **Greedy-Algorithmus**:
-
-1. Sortiere alle Spieler nach Effizienz (Punkte pro Coin)
-2. Wähle die effizientesten Spieler aus, die:
-   - Im Budget liegen
-   - Die Positions-Limits einhalten
-   - Punkte haben (tp > 0)
-3. Zeige Team-Zusammensetzung und Gesamtstatistiken
-
-### Positions-Limits:
-- **0 eingeben** = keine Beschränkung (egal)
-- **Zahl > 0** = Maximum dieser Position
-
-Beispiel: `Max Block = 0, Max Abwehr = 0` → Alle Positionen erlaubt!
-
-## 🌐 Hosting
-
-### GitHub Pages (kostenlos)
-1. Erstelle ein GitHub Repository
-2. Lade alle Dateien hoch
-3. Gehe zu Settings → Pages
-4. Wähle Branch: `main`, Folder: `/root`
-5. Fertig! URL: `https://username.github.io/repository/`
-
-### Netlify (kostenlos)
-1. Registriere dich auf netlify.com
-2. Drag & Drop den kompletten Ordner
-3. Fertig! Du bekommst eine URL
-
-### Vercel (kostenlos)
-1. Registriere dich auf vercel.com
-2. Import GitHub Repo oder Drag & Drop
-3. Fertig!
-
-## 🛠️ Technologie
-
-- **Vanilla JavaScript** - Keine Frameworks nötig
-- **CSS Grid & Flexbox** - Responsive Layout
-- **Google Fonts** - Outfit & JetBrains Mono
-- **Animations** - Smooth CSS Transitions
-
-## 📱 Browser-Support
-
-- Chrome/Edge ✅
-- Firefox ✅
-- Safari ✅
-- Mobile Browser ✅
-
-## 💡 Tipps
-
-1. **Effizienz ist König**: Spieler mit vielen Punkten pro Coin sind am wertvollsten
-2. **0 = egal**: Setze Positions-Limits auf 0 für maximale Flexibilität
-3. **Budget anpassen**: Erhöhe das Budget wenn kein Team gefunden wird
-4. **Daten aktuell halten**: Update `data.js` nach jedem Turnier
-
-## 📝 Lizenz
-
-Frei verwendbar für private Zwecke.
-
-## 🐛 Probleme?
-
-Die App funktioniert komplett offline im Browser. Bei Problemen:
-1. Browser-Cache leeren (Strg+F5)
-2. Console öffnen (F12) für Fehler
-3. `data.js` auf Syntax-Fehler prüfen (Komma fehlt?)
-
----
-
-Viel Erfolg mit deinem Fantasy Team! 🏐🏆
+Privatprojekt. Use at your own risk — die Daten kommen von Drittquellen, ich übernehme keine Garantie für Korrektheit.

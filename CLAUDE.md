@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A static-frontend (vanilla JS) + Python-backend tool that picks an optimal Fantasy team for the German Beach Tour. There is **no build step** — `app.js` is loaded directly by the browser. The Python side scrapes external data (DVV rankings, GBT bracket, H2H) and serves both the static files and a small JSON API.
 
-> Note: The top-level `README.md` is **outdated** (describes the old `data.js`/Greedy era). This file is the source of truth.
+> Note: `README.md` is a short public-facing intro for users / self-hosters. **This file (`CLAUDE.md`) is the implementation-level source of truth** for architecture, data flow, deploy mechanics and conventions.
 
 ## Running
 
@@ -50,17 +50,17 @@ Without this the server still works: `firestore_sync` soft-fails to `None`, the 
 
 ### Environment variables
 
-`scripts/_env.py` loads `.env` and `.env.local` (the latter wins) into `os.environ` at process start. Real env-vars from the shell / Docker / Fly secrets ALWAYS win — files only fill in what isn't already set.
+`scripts/_env.py` loads `.env` and `.env.local` (the latter wins) into `os.environ` at process start. Real env-vars from the shell / Docker / Cloud Run secrets ALWAYS win — files only fill in what isn't already set.
 
 | Var | Default | Purpose |
 |---|---|---|
 | `FIREBASE_API_KEY` | (from `data/firebase_auth.json`) | Firebase web API key (public). |
 | `FIREBASE_REFRESH_TOKEN` | (from `data/firebase_auth.json`) | Long-lived refresh token (sensitive). |
-| `DATA_DIR` | `<repo>/data` | Where all writable state lives. For Fly/Docker mount a volume here. |
-| `PORT` | `8000` | `serve.py` port. Fly.io sets this to 8080. |
+| `DATA_DIR` | `<repo>/data` | Where all writable state lives. On Cloud Run a GCS bucket is mounted here via gcsfuse. |
+| `PORT` | `8000` | `serve.py` port. Cloud Run sets this to 8080. |
 | `CURRENT_SEASON_YEAR` | system clock year | Override for backtesting or mid-year season transitions. |
 | `SUPABASE_URL` | (unset) | If set, `serve.py` requires `Authorization: Bearer <token>` on `/api/*` and `/data/*` and verifies it via the project's JWKS endpoint (`<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, asymmetric ES256/RS256 keys; `aud=authenticated`). Unset = auth disabled (Self-Host default). |
-| `CORS_ALLOW_ORIGIN` | `*` | Sent as `Access-Control-Allow-Origin`. On Fly: set to the Vercel domain so only your frontend can hit the API. |
+| `CORS_ALLOW_ORIGIN` | `*` | Sent as `Access-Control-Allow-Origin`. On Cloud Run: set to the Vercel domain so only your frontend can hit the API. |
 
 ## Data flow (the big picture)
 
@@ -215,7 +215,7 @@ Primary source for bracket data. Scrapes `https://beach.volleyball-verband.de/pu
 Source of truth for **prices, current roster, and historical season stats**. The gbt-fantasy.web.app project stores `season_stats/<year>` docs in Firestore — one map field per player ID, with `pr` (price; only on current year), `fn`/`ln`, `pos`, `g`, `tp`, `t`, `mp`, `ip`. Firestore REST requires auth (403 without).
 
 **Auth model** — user supplies a Firebase **refresh token** (long-lived) plus the public **API key**, either:
-- via `.env.local` / real env-vars: `FIREBASE_API_KEY`, `FIREBASE_REFRESH_TOKEN`  *(preferred — required for Docker/Fly deploys)*, or
+- via `.env.local` / real env-vars: `FIREBASE_API_KEY`, `FIREBASE_REFRESH_TOKEN`  *(preferred — required for Docker / Cloud Run deploys, where they live in Secret Manager)*, or
 - via the legacy `data/firebase_auth.json` file (still supported, file-fallback in `_load_auth()`).
 
 The server exchanges the refresh token for 1-hour ID-tokens via `securetoken.googleapis.com/v1/token` on demand. ID-tokens are cached in-memory for ~50 min so a single sim run reuses one.
@@ -293,7 +293,7 @@ Two distinct mechanisms — keep them separate when adding new banners:
 - The Bracket tab uses an 8-row CSS grid with explicit `grid-row: start/end`. Don't use fractional `--row` values; they silently overlap.
 - `predict_prob` returns a **tuple** `(float, str)` — callers must unpack it. `win_prob` returns a plain `float`.
 - H2H disk cache keys for individual records use `"|||"` as separator (e.g. `"mueller|||ehlers"`); deserialize by splitting on `"|||"`.
-- **`data/` writes must go through `data_dir()`** (in `scripts/_env.py`), never hardcoded `ROOT / "data"` — the Fly-deploy path relies on `$DATA_DIR` pointing at a mounted volume.
+- **`data/` writes must go through `data_dir()`** (in `scripts/_env.py`), never hardcoded `ROOT / "data"` — the Cloud Run deploy relies on `$DATA_DIR=/data` pointing at the gcsfuse-mounted GCS bucket.
 - Don't commit anything under `data/`. The `.gitignore` whitelists nothing — the directory is meant to be machine-local state.
 
 ## Deployment (Vercel + Google Cloud Run + Supabase)
@@ -359,7 +359,7 @@ gcloud secrets add-iam-policy-binding FIREBASE_API_KEY      --member=$SA --role=
 gcloud secrets add-iam-policy-binding FIREBASE_REFRESH_TOKEN --member=$SA --role="roles/secretmanager.secretAccessor"
 ```
 
-**Cloud Run deploy** (run from repo root on the `cloud-deploy` branch). Two-step because **`gcloud run deploy --add-volume-mount` is broken on Windows** — the CLI mangles the `mount-path` value and the API rejects it as `"should be a valid unix absolute path"`. We deploy without the volume, then attach the volume via a YAML replace.
+**Cloud Run deploy** (run from repo root on `main`). Two-step because **`gcloud run deploy --add-volume-mount` is broken on Windows** — the CLI mangles the `mount-path` value and the API rejects it as `"should be a valid unix absolute path"`. We deploy without the volume, then attach the volume via a YAML replace.
 
 Step 1 — build + deploy (no volume yet):
 ```powershell
