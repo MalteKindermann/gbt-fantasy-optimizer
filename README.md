@@ -28,7 +28,7 @@ Dann im Browser auf <http://localhost:8000>. Kein Login, kein Cloud-Account, nic
 
 Beim ersten Start ist die Spielerliste leer (kein laufendes Turnier registriert). Sobald ein GBT-Turnier ansteht oder läuft, lädt der eingebaute Scraper das Bracket automatisch. Damit auch Preise und neue Spieler aus dem offiziellen [gbt-fantasy.web.app](https://gbt-fantasy.web.app/)-Backend gezogen werden, brauchst du einmal einen Firebase-Refresh-Token:
 
-1. Auf <https://gbt-fantasy.web.app/> mit deinem Google-Account einloggen
+1. Auf <https://gbt-fantasy.web.app/> mit deinem Account einloggen
 2. Browser-DevTools öffnen (F12) → Console
 3. Inhalt von `fetch_auth_token.txt` einfügen und ausführen — das lädt eine `firebase_auth.json` herunter
 4. Datei nach `data/firebase_auth.json` legen (oder die zwei Werte in eine `.env.local` schreiben, Vorlage in `.env.local.example`)
