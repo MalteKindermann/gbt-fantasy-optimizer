@@ -66,6 +66,8 @@ CACHE_FILE = CACHE_DIR / "firestore_season.json"
 SECURE_TOKEN_URL  = "https://securetoken.googleapis.com/v1/token?key={api_key}"
 FIRESTORE_URL_TPL = ("https://firestore.googleapis.com/v1/projects/gbt-fantasy/"
                      "databases/(default)/documents/season_stats/{year}")
+TOURNAMENTS_LIST_URL = ("https://firestore.googleapis.com/v1/projects/gbt-fantasy/"
+                       "databases/(default)/documents/tournaments?pageSize=100")
 
 # Erstes Jahr, das Firestore zurückblickend hat. Per Probe gefunden — 2024 und
 # älter geben 404. Falls Firestore irgendwann ältere Jahre nachträgt, einfach
@@ -304,6 +306,125 @@ def parse_season_players(raw_doc: dict) -> dict[str, dict]:
     return out
 
 
+# ── Aktuelles Turnier (für tagesaktuelle Preise) ──────────────────────────────
+#
+# `season_stats/<year>.pl[id].pr` enthält Preise — aber die werden auf
+# gbt-fantasy.web.app nur unregelmäßig fortgeschrieben. Die echte Wahrheit liegt
+# in `tournaments/<doc_id>.players[]` — ein Array `[{id, price, firstName,
+# lastName, position, gender, imagePath, ...}]`, das pro Turnier neu gepflegt
+# wird. Beim Sync nehmen wir den Tournament-Preis als Override; falls ein
+# Spieler nur dort steht (Rookie, noch nicht in season_stats), wird er
+# synthetisiert ins Snapshot übernommen.
+
+def _pick_current_tournament(docs: list[dict]) -> dict | None:
+    """
+    Aus einer Liste von Tournament-Docs das jetzt relevante wählen:
+      • Running: today ∈ [start, end] → das jüngste davon
+      • Sonst: das nächste upcoming (start > today, kleinster start)
+      • Sonst: das letzte vergangene (für die "zwischen Turnieren"-Phase)
+    """
+    today = datetime.date.today().isoformat()
+    running, upcoming, past = [], [], []
+    for d in docs:
+        f = d.get("fields", {})
+        start = (f.get("start") or {}).get("timestampValue", "")[:10]
+        end   = (f.get("end")   or {}).get("timestampValue", "")[:10]
+        if not start:
+            continue
+        if start <= today and (not end or today <= end):
+            running.append((start, d))
+        elif start > today:
+            upcoming.append((start, d))
+        else:
+            past.append((start, d))
+    if running:
+        return max(running)[1]
+    if upcoming:
+        return min(upcoming)[1]
+    if past:
+        return max(past)[1]
+    return None
+
+
+def fetch_current_tournament_players(id_token: str) -> dict[str, dict] | None:
+    """
+    Holt die `players[]` aus dem aktuellen/nächsten `tournaments/<doc>`-Eintrag.
+    Returns:
+        {playerId: {price, firstName, lastName, pos, gender, img}}
+        oder None bei Fehler (silent — nicht-fatal, Caller fällt auf season_stats zurück)
+    """
+    try:
+        r = requests.get(
+            TOURNAMENTS_LIST_URL,
+            headers={"Authorization": f"Bearer {id_token}"},
+            timeout=10,
+        )
+        r.raise_for_status()
+        docs = r.json().get("documents", [])
+    except Exception as e:
+        print(f"  WARN tournaments-Liste-Fetch fehlgeschlagen: {e}", file=sys.stderr)
+        return None
+
+    chosen = _pick_current_tournament(docs)
+    if chosen is None:
+        return None
+
+    name = (chosen["fields"].get("name") or {}).get("stringValue", "?")
+    arr  = (chosen["fields"].get("players") or {}).get("arrayValue", {}).get("values", [])
+    POS_DE_TO_EN = {"Abwehr": "Abwehr", "Block": "Block", "Hybrid": "Hybrid"}
+    out: dict[str, dict] = {}
+    for entry in arr:
+        m = entry.get("mapValue", {}).get("fields", {})
+        pid   = _fs_val(m.get("id"))
+        price = _fs_val(m.get("price"))
+        if pid is None:
+            continue
+        out[str(pid)] = {
+            "firstName": _fs_val(m.get("firstName")) or "",
+            "lastName":  _fs_val(m.get("lastName"))  or "",
+            "pos":       POS_DE_TO_EN.get(_fs_val(m.get("position")) or "", _fs_val(m.get("position")) or ""),
+            "gender":    _fs_val(m.get("gender"))    or "",
+            "img":       _fs_val(m.get("imagePath")) or "",
+            "price":     int(price) if price is not None else None,
+        }
+    print(f"  ✓ Aktuelles Turnier {name!r}: {len(out)} Spielerpreise als Override.")
+    return out
+
+
+def _overlay_tournament_prices(players: dict[str, dict],
+                                tour_players: dict[str, dict]) -> int:
+    """
+    Mergt Tournament-Daten ins season_stats-Players-Dict:
+      • Spieler in season_stats UND Turnier: price wird auf den Turnier-Wert gesetzt
+      • Spieler nur im Turnier (Rookie): wird neu angelegt mit price + Identität,
+        Stats (tp/t/mp) bleiben 0 — kommen mit dem nächsten season_stats-Update
+    Returns Anzahl Preis-Änderungen (für Logging).
+    """
+    changed = 0
+    for pid, tp in tour_players.items():
+        new_price = tp.get("price")
+        if new_price is None:
+            continue
+        if pid in players:
+            if players[pid].get("price") != new_price:
+                changed += 1
+                players[pid]["price"] = new_price
+        else:
+            # Rookie: nur im Turnier, noch nicht in season_stats
+            players[pid] = {
+                "firstName": tp.get("firstName", ""),
+                "lastName":  tp.get("lastName", ""),
+                "price":     new_price,
+                "pos":       tp.get("pos", ""),
+                "gender":    tp.get("gender", ""),
+                "tp":        0.0,
+                "t":         0,
+                "mp":        0,
+                "img":       tp.get("img", ""),
+            }
+    return changed
+
+
 # ── Disk-Cache ────────────────────────────────────────────────────────────────
 
 def _load_cached_snapshot(ttl: int = SNAPSHOT_TTL_SECONDS):
@@ -383,6 +504,16 @@ def fetch_firestore_season(force: bool = False) -> dict[str, dict] | None:
             f"falls die Saison schon angelegt sein sollte, "
             f"setze CURRENT_SEASON_YEAR per env-var.")
     players   = parse_season_players(raw_doc)
+
+    # Tournament-Price-Overlay: `season_stats.pr` ist nicht immer tagesaktuell,
+    # die echte Wahrheit für das laufende/anstehende Turnier ist in
+    # `tournaments/<doc>.players[].price`. Wir mergen das jetzt drüber.
+    tour_players = fetch_current_tournament_players(id_token)
+    if tour_players:
+        n_changed = _overlay_tournament_prices(players, tour_players)
+        if n_changed:
+            print(f"  ✓ {n_changed} Preise via tournaments[]-Override aktualisiert.")
+
     _save_snapshot(players)
     # Spiegele das Roh-Doc nach data/players_season_<year>.json UND nach dem
     # legacy-Pfad data/players_season.json (für Backward-Compat mit dem

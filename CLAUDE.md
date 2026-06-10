@@ -212,7 +212,9 @@ Primary source for bracket data. Scrapes `https://beach.volleyball-verband.de/pu
 
 ## Firestore Sync (`scripts/firestore_sync.py`)
 
-Source of truth for **prices, current roster, and historical season stats**. The gbt-fantasy.web.app project stores `season_stats/<year>` docs in Firestore — one map field per player ID, with `pr` (price; only on current year), `fn`/`ln`, `pos`, `g`, `tp`, `t`, `mp`, `ip`. Firestore REST requires auth (403 without).
+Source of truth for **prices, current roster, and historical season stats**. The gbt-fantasy.web.app project stores `season_stats/<year>` docs in Firestore — one map field per player ID, with `pr` (price), `fn`/`ln`, `pos`, `g`, `tp`, `t`, `mp`, `ip`. Firestore REST requires auth (403 without).
+
+**Price source-of-truth caveat**: `season_stats.<year>.pl[id].pr` is *not* always tagesaktuell — the live website reads current prices from a separate `tournaments/<doc_id>` collection (one doc per real-world tournament with a `players[]` array containing `{id, price, firstName, lastName, position, gender, imagePath, ...}`). Our `fetch_firestore_season()` automatically picks the running/next/most-recent tournament via `fetch_current_tournament_players()` and overlays its `price` values onto the `season_stats` snapshot. Rookies that only exist in the tournament doc (not yet in `season_stats`) are synthesized with zero stats. This happens transparently — every consumer that reads `fetch_firestore_season()` gets the corrected prices.
 
 **Auth model** — user supplies a Firebase **refresh token** (long-lived) plus the public **API key**, either:
 - via `.env.local` / real env-vars: `FIREBASE_API_KEY`, `FIREBASE_REFRESH_TOKEN`  *(preferred — required for Docker / Cloud Run deploys, where they live in Secret Manager)*, or
