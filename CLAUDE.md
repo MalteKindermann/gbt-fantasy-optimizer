@@ -15,13 +15,19 @@ A static-frontend (vanilla JS) + Python-backend tool that picks an optimal Fanta
 pip install -r scripts/requirements.txt
 
 # Start the dev server (drop-in replacement for `python -m http.server`)
-python scripts/serve.py            # serves on :8000
-python scripts/serve.py 8123       # on a different port
+python scripts/serve.py            # serves on :8000  (or $PORT)
+python scripts/serve.py 8123       # explicit port
 
 # Run the simulator manually (also runs implicitly via the server's /api/simulate)
 python scripts/simulate_tournament.py --gender m
 python scripts/simulate_tournament.py --gender f
 python scripts/simulate_tournament.py --gender m --simulations 50000 --force-refresh
+
+# Fetch a fresh Firestore snapshot from the CLI (handy for debugging auth)
+python scripts/firestore_sync.py --print
+
+# Probe what DVV thinks today's tournament is
+python scripts/dvv_tournament.py --gender m --print
 ```
 
 **Always use `serve.py`, not `python -m http.server`.** The static server has no API endpoints — clicking "Prognose neu" or the price/ambiguity pickers will return 404.
@@ -29,6 +35,30 @@ python scripts/simulate_tournament.py --gender m --simulations 50000 --force-ref
 After Python code changes you must restart `serve.py` (Ctrl+C → re-run); Python doesn't hot-reload. After frontend changes the browser also needs a hard reload (Ctrl+Shift+R) — `serve.py` already sends `Cache-Control: no-store` for `.js`/`.html`/`.css`/`.json`, so a normal reload works after the first hard reload.
 
 There are no tests, no linter, no build, no package.json scripts.
+
+### One-time setup for Firestore-backed features
+
+To get auto-synced prices, ambiguous-name resolution and Firestore-only players (rookies), the server needs a Firebase refresh token:
+
+1. Log in at `https://gbt-fantasy.web.app/`.
+2. Open DevTools → Console.
+3. Paste the contents of `fetch_auth_token.txt`. It downloads a `firebase_auth.json`.
+4. Either put the file at `data/firebase_auth.json` **or** copy its `apiKey`/`refreshToken` values into `.env.local` (see `.env.local.example`).
+5. Restart `serve.py`.
+
+Without this the server still works: `firestore_sync` soft-fails to `None`, the manual "Preise eintragen" picker stays available, and you lose only the auto-roster + auto-price features.
+
+### Environment variables
+
+`scripts/_env.py` loads `.env` and `.env.local` (the latter wins) into `os.environ` at process start. Real env-vars from the shell / Docker / Fly secrets ALWAYS win — files only fill in what isn't already set.
+
+| Var | Default | Purpose |
+|---|---|---|
+| `FIREBASE_API_KEY` | (from `data/firebase_auth.json`) | Firebase web API key (public). |
+| `FIREBASE_REFRESH_TOKEN` | (from `data/firebase_auth.json`) | Long-lived refresh token (sensitive). |
+| `DATA_DIR` | `<repo>/data` | Where all writable state lives. For Fly/Docker mount a volume here. |
+| `PORT` | `8000` | `serve.py` port. Fly.io sets this to 8080. |
+| `CURRENT_SEASON_YEAR` | system clock year | Override for backtesting or mid-year season transitions. |
 
 ## Data flow (the big picture)
 
@@ -64,23 +94,32 @@ There are no tests, no linter, no build, no package.json scripts.
 
 ## Files that matter
 
+Tracked in the repo:
+
 | Path | Purpose |
 |---|---|
 | `index.html` | Four tabs: 📊 Alle Spieler · 🔒 Meine Picks · ⚖ Vergleich · 🏆 Turnier-Baum. The filter bar (`.player-filters` — pos/gender/status/price-range/sort) is injected by JS into BOTH the Alle-Spieler and Meine-Picks tabs from a shared `playerFilters` global; changes mirror across both. A top-level `🆚 H2H Vergleich` button opens an ad-hoc two-player comparator. |
 | `app.js` | Single-file frontend. State held in module-level `let`. Renders into existing tab-content divs. |
 | `styles.css` | Hand-written, no preprocessor. Dark theme with CSS custom properties under `:root`. |
+| `scripts/_env.py` | Tiny stdlib-only dotenv loader + `data_dir()` resolver. Imported by every entry-point script. |
 | `scripts/simulate_tournament.py` | Scraping, caching, sync, Monte-Carlo, deterministic prediction, JSON output. |
-| `scripts/serve.py` | `ThreadingTCPServer` subclass. Imports `simulate_tournament` to handle the simulate endpoint inline. |
-| `scripts/firestore_sync.py` | Fetches the gbt-fantasy.web.app Firestore season-doc via refresh-token auth. Source of truth for prices and active-season player list. |
-| `scripts/dvv_tournament.py` | **Primary bracket source.** Scrapes `beach.volleyball-verband.de/public/`: discovers the next/current "Deutsche Beach-Volleyball Tour\\German Beach Tour" tournament per gender, parses Setzliste + Spielplan, and emits a bracket-dict in the legacy gbt.hanski.de schema (plus `meta.source='dvv'` and `matches[]` for already-played games). `fetch_tournament_bracket()` in `simulate_tournament.py` tries this first; if it fails or the tournament size doesn't fit the 8-team template, the gbt.hanski.de fallback is used. |
-| `data/firebase_auth.json` | **User-provided, gitignored.** `{apiKey, refreshToken, ...}` from the one-time browser-console snippet. Refresh-token lives until user actively logs out. |
-| `fetch_auth_token.txt` | Browser-console snippet that produces `firebase_auth.json` (run once on `https://gbt-fantasy.web.app/` after login). |
-| `data/players_all.json` | Full season database — **edit manually** for `pos`/`tp`/`t`/`mp`. Position is not auto-fetched. New players with no GBT history get `tp:0`. |
-| `data/players_available.json` | Auto-synced from current brackets on every sim run. New players land with `price: -1`. User price/name choices are preserved on resync. |
+| `scripts/serve.py` | `ThreadingTCPServer` subclass. Imports `simulate_tournament` to handle the simulate endpoint inline. Creates empty `players_available.json` stub at startup so a fresh clone doesn't 404. |
+| `scripts/firestore_sync.py` | Fetches gbt-fantasy.web.app Firestore docs via refresh-token auth — current season + every year from `EARLIEST_SEASON_YEAR=2025` up to today's year. Source of truth for prices, current roster, and historical season stats. |
+| `scripts/dvv_tournament.py` | **Primary bracket source.** Scrapes `beach.volleyball-verband.de/public/`: discovers the next/current "Deutsche Beach-Volleyball Tour\\German Beach Tour" tournament per gender, parses Setzliste + Spielplan, and emits a bracket-dict in the legacy gbt.hanski.de schema (plus `meta.source='dvv'` and `matches[]` for already-played games). `fetch_tournament_bracket()` tries this first; on failure or non-8-team bracket, falls back to `_fetch_gbt_bracket_legacy()`. |
+| `fetch_auth_token.txt` | Browser snippet to produce `firebase_auth.json` (run once on `https://gbt-fantasy.web.app/` after login). |
+| `fetch_new_data.txt` | Legacy browser snippet to dump the current-season Firestore doc manually. Mostly obsolete now (`firestore_sync.py` does it automatically), kept as a backup. |
+| `.env.local.example` | Template for `.env.local` (which is gitignored — see Environment variables above). |
+
+Gitignored (auto-generated under `$DATA_DIR`):
+
+| Path | Purpose |
+|---|---|
+| `data/firebase_auth.json` | Refresh-token file (alternative to `.env.local`). |
+| `data/players_season_<year>.json` | Raw Firestore season-doc per year (`2025`, `2026`, …). Auto-fetched by `firestore_sync`; **one-shot** per year (historical data doesn't change). |
+| `data/players_season.json` | Legacy alias for the current year's overlay — `firestore_sync` keeps it in sync for backward-compat. |
+| `data/players_available.json` | List of `{name, price}` rebuilt from the current bracket on every sim run. Created as empty `[]` stub by `serve.py` on first start. |
 | `data/tournament_sim.json` | Sim output. Keyed by `byGender.m` and `byGender.f`; `playerExpectedMatches` at top level is the merged across genders. |
-| `data/bracket_{m,f}.json` | **Optional fallback**; normally auto-fetched from `https://gbt.hanski.de/rechner/data/bracket_{m,f}.json`. |
-| `data/.cache/` | Disk cache: DVV (TTL 1 h) / GBT bracket (1 h) / H2H per-pair (24 h). Wipe or pass `--force-refresh` to refresh. |
-| `fetch_new_data.txt` | Browser-console snippet to re-export the player base JSON from the GBT app. |
+| `data/.cache/` | Disk caches: DVV scrapes (1 h), gbt.hanski.de bracket fallback (1 h), H2H per-pair (24 h), Firestore snapshot (10 min). Wipe or pass `--force-refresh` to bypass. |
 
 ## Backend API (`scripts/serve.py`)
 
@@ -92,14 +131,17 @@ There are no tests, no linter, no build, no package.json scripts.
 
 ## Algorithms (in `app.js`)
 
-Four are run on every "Team Optimieren" click; the comparison tab shows all side-by-side.
+Up to five algorithms run on every "Team Optimieren" click — the comparison tab shows all available ones side-by-side.
 
-| Algorithm | Objective metric | Notes |
+| Algorithm | Objective metric | Enabled when |
 |---|---|---|
-| **Optimal** (B&B) | `Σ avgPerTournament` | Raw season average. |
-| **Konsistent** (B&B) | `Σ adjustedPT` (Bayes shrinkage, k=3) | Penalises low-tournament-count players. |
-| **Turnier-Prognose** (B&B) | `Σ (avgPerMatch × expectedMatches)` | Only enabled when `tournament_sim.json` exists. |
-| **Turnier-Manuell** (B&B) | `Σ (avgPerMatch × manualExpectedMatches)` | Only enabled when manual bracket overrides exist. |
+| **Optimal** (B&B) | `Σ avgPerTournament` | always |
+| **Konsistent** (B&B) | `Σ adjustedPT` (Bayes shrinkage, k=3) | always |
+| **Turnier-Prognose** (B&B) | `Σ (avgPerMatch × expectedMatches)` | `tournament_sim.json` exists |
+| **Turnier-Manuell** (B&B) | `Σ (avgPerMatch × manualExpectedMatches)` | manual bracket overrides exist |
+| **Finale-Fokus** (B&B) | `Σ finalRoundObjective` (`roundLevel × 1000 + avgPerTournament` — primary axis = reaching semi (1000) / final (2000), tiebreaker = season avg) | `tournament_sim.json` exists |
+
+`getObjectiveValue(player, alg)` is the single switch keying each algorithm to the player attribute it maximizes.
 
 Single solver: `optimizeBranchBound` (DFS + fractional-knapsack upper-bound pruning). Supports max-Block / max-Abwehr / size constraints.
 
@@ -168,38 +210,63 @@ Primary source for bracket data. Scrapes `https://beach.volleyball-verband.de/pu
 
 ## Firestore Sync (`scripts/firestore_sync.py`)
 
-Source of truth for **current-season prices and the active player list**. The gbt-fantasy.web.app project stores `season_stats/2026` in Firestore — one map field per player ID, with `pr` (price), `fn`/`ln`, `pos`, `g`, `tp`, `t`, `mp`, `ip`. Firestore REST requires auth (403 without).
+Source of truth for **prices, current roster, and historical season stats**. The gbt-fantasy.web.app project stores `season_stats/<year>` docs in Firestore — one map field per player ID, with `pr` (price; only on current year), `fn`/`ln`, `pos`, `g`, `tp`, `t`, `mp`, `ip`. Firestore REST requires auth (403 without).
 
-**Auth model** — user runs `fetch_auth_token.txt` once on `https://gbt-fantasy.web.app/` after logging in. It writes `data/firebase_auth.json` (gitignored) containing the Firebase API key (public — not a secret) and the user's **refresh token** (sensitive). The server exchanges that for fresh 1-hour ID-tokens via `securetoken.googleapis.com/v1/token` whenever needed.
+**Auth model** — user supplies a Firebase **refresh token** (long-lived) plus the public **API key**, either:
+- via `.env.local` / real env-vars: `FIREBASE_API_KEY`, `FIREBASE_REFRESH_TOKEN`  *(preferred — required for Docker/Fly deploys)*, or
+- via the legacy `data/firebase_auth.json` file (still supported, file-fallback in `_load_auth()`).
 
-**Two-layer cache**:
-- In-memory ID-token cache (~50 min) so a single sim run reuses one token.
-- Disk-cache `data/.cache/firestore_season.json` (TTL **10 min**) so repeated UI clicks don't hit Firestore.
+The server exchanges the refresh token for 1-hour ID-tokens via `securetoken.googleapis.com/v1/token` on demand. ID-tokens are cached in-memory for ~50 min so a single sim run reuses one.
 
-**Failure semantics** — if `firebase_auth.json` is missing, `fetch_firestore_season()` returns `None` silently and downstream falls back to the local-only flow. The explicit `/api/firestore-sync` endpoint returns **401 + hint** to drive the user to set things up.
+**Multi-year fetch model** — `season_years()` returns `[EARLIEST_SEASON_YEAR … current_season_year()]`. `EARLIEST_SEASON_YEAR=2025` was empirically determined (Firestore returns 404 for older). On every `fetch_firestore_season()` call:
+
+1. The current year is fetched (10-min disk cache TTL, write both `players_season_<year>.json` and the legacy `players_season.json`).
+2. Each archive year is fetched **once** via `fetch_archive_season(year)` — file-exists check skips re-fetching since historical seasons don't change.
+3. When the system clock rolls over to a new year, the new year is auto-attempted on next sync (no code change needed at season-rollover).
+
+`current_season_year()` is `os.environ["CURRENT_SEASON_YEAR"]` if set, else `datetime.date.today().year`. Useful for backtesting.
+
+**Failure semantics** — if auth is missing, `fetch_firestore_season()` returns `None` silently and the rest of the pipeline degrades gracefully (manual price picker still works, ambiguity picker re-appears). The explicit `/api/firestore-sync` endpoint returns **401 + hint** to drive the user to set things up.
 
 **Wire-in points**:
-- `sync_players_available_from_brackets` — Firestore `pr` overrides existing prices (logs diff as `prices_changed`).
-- `map_teams_to_players` — when `fs_season` is provided, candidate pool per last-name is **narrowed** to player IDs present in the season doc. Falls back to the unfiltered pool per surname if narrowing would leave zero candidates (stale-snapshot guard). This is the primary fix for ambiguous surnames like the four-Wüst case.
+- `sync_players_available_from_brackets` — Firestore `pr` overwrites stored prices (logs each diff as `prices_changed`). Also runs even when both brackets are empty (between tournaments) to refresh prices without wiping the player list.
+- `map_teams_to_players` — when `fs_season` is provided, the per-last-name candidate pool is **narrowed** to player IDs present in the current season doc. Defensive: falls back to the unfiltered pool per surname if narrowing would leave zero candidates (stale-snapshot guard).
+- Both `map_teams_to_players` and `sync_players_available_from_brackets` **synthesize player records from Firestore data** for IDs not in `players_all.json` — that's how rookies like Milan Sievers (Firestore-only) get resolved.
+
+## Multi-year roster (frontend overlay merge)
+
+Since `players_all.json` was removed from the repo, the **frontend builds the player roster from the Firestore overlays alone**:
+
+- `loadAllSeasonOverlays()` in `app.js` probes `data/players_season_<year>.json` for every year in `2025..(currentYear+1)`, 404s on missing years are silently skipped, falls back to the legacy `players_season.json` if no year-suffixed file exists.
+- `loadPlayerData()` then builds `allPlayers` by:
+  - **Roster** = union of all overlays' player IDs.
+  - **Identity** (`firstName`, `lastName`, `pos`, `gender`, `img`) = newest year overlay that has `fn`/`ln` for the id. `players_all.json` is read only as an identity fallback for IDs no overlay covers.
+  - **Stats** (`tp`, `t`, `mp`) = **summed** across all overlay years. The old "players_all + current overlay" addition was retired — it accidentally worked because `players_all.json` happened to equal the 2025 export, but would have double-counted as soon as more years existed.
+
+If you ever need pre-2025 historical stats, that data simply isn't in Firestore — `EARLIEST_SEASON_YEAR` would have to be lowered AND someone would have to populate those docs.
 
 ## Mapping bracket teams → player IDs (`map_teams_to_players`)
 
-Called once per sim run to build the `team → [playerId]` table that feeds `playerExpectedMatches`. When a bracket last name has multiple candidates in `players_all.json` (e.g. four Wüsts but only two play this tournament), the function:
+Called once per sim run to build the `team → [playerId]` table that feeds `playerExpectedMatches`. The candidate pool is `players_all.json` (if present) PLUS every Firestore-only player synthesized from `fs_season` — so rookies missing from `players_all` still resolve. When a bracket last name has multiple candidates (e.g. four Wüsts but only two play this tournament), the resolution layers are:
 
-1. Prefers a full name already in `players_available.json` (the user's confirmed pick from the ambiguous-name picker) that hasn't been assigned to another bracket slot yet.
-2. Falls back to the highest-`tp` candidate not yet assigned.
-3. Last resort: the highest-tp candidate overall (only when bracket has more slots for that surname than `players_all.json` has rows).
+1. **Firestore narrowing**: if `fs_season` is provided, the candidate pool per surname is restricted to player IDs in the current season doc. Falls back to the unrestricted pool per surname if narrowing yields zero candidates (stale-snapshot guard).
+2. **User confirmation**: a full name already in `players_available.json` (i.e. the user picked it via the ambiguous-name modal) wins.
+3. **Highest-tp candidate** that hasn't been assigned to another slot yet.
+4. **Last resort**: the highest-tp candidate overall (only when the bracket has more slots for that surname than there are candidate rows).
 
-The per-surname `assigned` set guarantees two bracket slots with the same last name pick **different** full names. Before this was added, a naive last-name → ID dict overwrote on collisions, so Tamo and Lui Wüst both collapsed to whichever Wüst happened to come last in iteration order — and `expectedPoints` was `null` for the actual bracket players.
+The per-surname `assigned` set guarantees two bracket slots with the same surname pick **different** full names. Before this was added, a naive last-name → ID dict overwrote on collisions, so Tamo and Lui Wüst both collapsed to whichever Wüst happened to come last in iteration order — and `expectedPoints` was `null` for the actual bracket players.
 
 ## Sync logic (`sync_players_available_from_brackets`)
 
-Runs at the start of every simulation:
-- Only numeric seedings 1–N are kept; `Q*` qualifiers and seed 99 withdrawals are skipped.
-- New bracket players → `price: -1`. Existing prices are preserved.
-- Players no longer in any bracket are **dropped**.
-- Ambiguous last names: existing entry in `players_available.json` wins; otherwise highest-`tp` wins.
-- Ambiguous matches → `tournament_sim.json → syncInfo.ambiguous` → frontend offers the name picker.
+Runs at the start of every simulation. Order of operations:
+
+1. **Try Firestore** (`fetch_firestore_season(force=force)`) — soft-fails to `None` if no auth.
+2. **Augment the player pool** with Firestore-only players (rookies absent from `players_all.json`).
+3. **Walk both gender brackets** (DVV primary, gbt.hanski.de fallback). Numeric seedings 1..N are kept; `Q*` qualifiers and seed 99 withdrawals are skipped.
+4. **Two safety modes** for the write-back:
+   - **Both brackets empty** (between tournaments): refuses to wipe `players_available.json`. Instead loops through existing entries and updates **only prices** from the Firestore snapshot, then returns.
+   - **Brackets populated**: rebuilds the list to match the bracket roster. New bracket players land with `price` from Firestore (or `-1` fallback). Players no longer in any bracket are dropped. Existing user prices are overwritten when Firestore has a different value (each diff logged into `prices_changed`).
+5. **Ambiguous matches** (surnames with multiple plausible candidates after Firestore narrowing) → recorded into `tournament_sim.json → syncInfo.ambiguous` → frontend offers the picker UI.
 
 ## Manual bracket overrides
 
@@ -224,3 +291,11 @@ Two distinct mechanisms — keep them separate when adding new banners:
 - The Bracket tab uses an 8-row CSS grid with explicit `grid-row: start/end`. Don't use fractional `--row` values; they silently overlap.
 - `predict_prob` returns a **tuple** `(float, str)` — callers must unpack it. `win_prob` returns a plain `float`.
 - H2H disk cache keys for individual records use `"|||"` as separator (e.g. `"mueller|||ehlers"`); deserialize by splitting on `"|||"`.
+- **`data/` writes must go through `data_dir()`** (in `scripts/_env.py`), never hardcoded `ROOT / "data"` — the Fly-deploy path relies on `$DATA_DIR` pointing at a mounted volume.
+- Don't commit anything under `data/`. The `.gitignore` whitelists nothing — the directory is meant to be machine-local state.
+
+## Repo & branches
+
+- `main` — primary working branch.
+- `fly-deploy` — held in sync with `main` and used for Fly.io-specific commits (Dockerfile, `fly.toml`, etc.) once those land. Anything not Docker/Fly-specific belongs on `main`.
+- History has been rewritten with `git filter-repo` to scrub stale `data/*.json` snapshots. If you ever need to do another scrub, the executable is at `~/AppData/Roaming/Python/Python311/Scripts/git-filter-repo.exe` (Windows install via `pip install --user git-filter-repo`).
