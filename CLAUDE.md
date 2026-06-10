@@ -348,32 +348,49 @@ echo -n "<firebase-refresh-token>"| gcloud secrets create FIREBASE_REFRESH_TOKEN
 # SUPABASE_URL is public (just the project URL), passed as a plain env-var in the deploy command — no secret needed.
 ```
 
-**Cloud Run deploy** (run from repo root on the `cloud-deploy` branch, after `config.js` is filled in):
+**One-time IAM** so the Cloud Run runtime SA can mount the bucket and read secrets:
 ```powershell
-gcloud run deploy gbt-fantasy `
+$PROJECT_NUM=$(gcloud projects describe gbt-fantasy-optimizer --format="value(projectNumber)")
+$SA="serviceAccount:$PROJECT_NUM-compute@developer.gserviceaccount.com"
+gcloud storage buckets add-iam-policy-binding gs://gbt-fantasy-optimizer-data --member=$SA --role="roles/storage.objectUser"
+gcloud secrets add-iam-policy-binding FIREBASE_API_KEY      --member=$SA --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding FIREBASE_REFRESH_TOKEN --member=$SA --role="roles/secretmanager.secretAccessor"
+```
+
+**Cloud Run deploy** (run from repo root on the `cloud-deploy` branch). Two-step because **`gcloud run deploy --add-volume-mount` is broken on Windows** — the CLI mangles the `mount-path` value and the API rejects it as `"should be a valid unix absolute path"`. We deploy without the volume, then attach the volume via a YAML replace.
+
+Step 1 — build + deploy (no volume yet):
+```powershell
+gcloud run deploy gbt-fantasy-optimizer `
   --source . `
   --region us-central1 `
   --allow-unauthenticated `
-  --memory 512Mi `
-  --cpu 1 `
-  --timeout 600 `
-  --concurrency 80 `
-  --min-instances 0 `
-  --max-instances 2 `
-  --add-volume name=data,type=cloud-storage,bucket=gbt-fantasy-data `
-  --add-volume-mount volume=data,mount-path=/data `
-  --set-env-vars CORS_ALLOW_ORIGIN=https://<your>.vercel.app,SUPABASE_URL=https://<proj>.supabase.co `
+  --memory 512Mi --cpu 1 --timeout 600 --concurrency 80 `
+  --min-instances 0 --max-instances 2 `
+  --execution-environment gen2 `
+  --set-env-vars SUPABASE_URL=https://<proj>.supabase.co `
   --set-secrets FIREBASE_API_KEY=FIREBASE_API_KEY:latest,FIREBASE_REFRESH_TOKEN=FIREBASE_REFRESH_TOKEN:latest
 ```
-`gcloud run deploy --source .` uses the `Dockerfile` automatically. First deploy takes ~3 min, subsequent ones ~1 min. The output URL goes into `config.js` as `API_BASE`.
+First deploy ~3 min (Cloud Build), subsequent ones ~1 min. The output URL goes into `config.js` as `API_BASE`.
 
-**One-time grant** so the service account can mount the bucket:
+Step 2 — attach GCS volume via YAML (one-time per service; survives re-deploys):
 ```powershell
-$PROJECT_NUM=$(gcloud projects describe gbt-fantasy --format="value(projectNumber)")
-gcloud storage buckets add-iam-policy-binding gs://gbt-fantasy-data `
-  --member="serviceAccount:$PROJECT_NUM-compute@developer.gserviceaccount.com" `
-  --role="roles/storage.objectUser"
+# Export current spec, then patch in the volume + volumeMount blocks
+gcloud run services describe gbt-fantasy-optimizer --region=us-central1 --format=export > svc.yaml
+# Edit svc.yaml: add to spec.template.spec.containers[0]:
+#   volumeMounts:
+#   - name: data
+#     mountPath: /data
+# and to spec.template.spec:
+#   volumes:
+#   - name: data
+#     csi:
+#       driver: gcsfuse.run.googleapis.com
+#       volumeAttributes:
+#         bucketName: gbt-fantasy-optimizer-data
+gcloud run services replace svc.yaml --region=us-central1
 ```
+Subsequent `gcloud run deploy --source .` re-builds the image without touching the volume — once attached, it stays. To set `CORS_ALLOW_ORIGIN` later (once the Vercel domain is known): `gcloud run services update gbt-fantasy-optimizer --region=us-central1 --update-env-vars CORS_ALLOW_ORIGIN=https://<your>.vercel.app`.
 
 **Vercel**: connect the repo with **Branch = `cloud-deploy`**, no build command, output dir empty. On `cloud-deploy`, edit `config.js` to hold the Cloud Run URL + Supabase URL + anon key, commit, push. Vercel deploys automatically.
 
