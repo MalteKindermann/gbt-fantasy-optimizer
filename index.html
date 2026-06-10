@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GBT Fantasy Team Optimizer</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏐 GBT Fantasy Optimizer</h1>
+            <p class="subtitle">Statistisch optimales Team für German Beach Tour 2025</p>
+        </header>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>Budget (Coins)</label>
+                <input type="number" id="budget" value="240" min="0">
+            </div>
+            <div class="control-group">
+                <label>Teamgröße</label>
+                <input type="number" id="teamSize" value="6" min="1" max="12">
+            </div>
+            <div class="control-group">
+                <label>Max Block (0 = egal)</label>
+                <input type="number" id="maxBlock" value="0" min="0">
+            </div>
+            <div class="control-group">
+                <label>Max Abwehr (0 = egal)</label>
+                <input type="number" id="maxAbwehr" value="0" min="0">
+            </div>
+            <div class="control-group">
+                <button class="btn" onclick="optimizeTeam()">🚀 Team Optimieren</button>
+            </div>
+            <div class="control-group">
+                <button class="btn" style="background:var(--bg-card);color:var(--text-dim);border:1px solid var(--border)"
+                        onclick="refreshSim()" title="Turnier-Prognose neu berechnen (DVV/H2H/Bracket erneut abrufen)">
+                    🔄 Prognose neu
+                </button>
+            </div>
+            <div class="control-group">
+                <button class="btn" style="background:var(--bg-card);color:var(--text-dim);border:1px solid var(--border)"
+                        onclick="refreshFirestorePrices()" title="Preise & Spielerliste aus dem gbt-fantasy.web.app-Firestore synchronisieren (braucht einmal data/firebase_auth.json)">
+                    📥 Firestore-Preise
+                </button>
+            </div>
+            <div class="control-group">
+                <button class="btn" style="background:var(--bg-card);color:var(--text);border:1px solid var(--border)"
+                        onclick="openH2HCompare()" title="Zwei beliebige Spieler direkt vergleichen">
+                    🆚 H2H Vergleich
+                </button>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('players', this)">📊 Alle Spieler</div>
+            <div class="tab"        onclick="switchTab('picks',   this)">🔒 Meine Picks</div>
+            <div class="tab"        onclick="switchTab('compare', this)">⚖ Vergleich der Teams</div>
+            <div class="tab"        onclick="switchTab('bracket', this)">🏆 Turnier-Baum</div>
+        </div>
+
+        <div id="picksTab" class="tab-content">
+            <div class="loading">Lade Spielerdaten…</div>
+        </div>
+
+        <div id="playersTab" class="tab-content active">
+            <!-- .player-filters bar is injected by renderPlayers() so it stays
+                 in sync with the identical bar on the Picks tab. -->
+            <div class="player-grid" id="playerGrid">
+                <div class="loading">Lade Spielerdaten…</div>
+            </div>
+        </div>
+
+        <div id="bracketTab" class="tab-content">
+            <p class="tab-hint">
+                Most-Likely-Path Vorhersage basierend auf DVV-Ranking + H2H-Bilanz.
+                Bei knappen Spielen (&lt; 15&nbsp;% Differenz) wird 50/50 angenommen.
+                Internationale Teams ohne DVV-Daten werden über die Turniersetzliste geschätzt.
+            </p>
+            <div class="bracket-controls">
+                <div class="bracket-gender-toggle" id="bracketGenderToggle">
+                    <button class="filter-pill active" data-bg="m">♂ Männer</button>
+                    <button class="filter-pill" data-bg="f">♀ Frauen</button>
+                </div>
+                <label class="manual-toggle-label">
+                    <input type="checkbox" id="manualModeToggle" onchange="toggleManualMode(this.checked)">
+                    ✏ Manuell anpassen
+                </label>
+                <button class="btn-inline btn-inline-ghost" onclick="clearManualOverrides()"
+                        id="clearManualBtn" style="display:none; font-size:0.8rem; padding:0.3rem 0.75rem">
+                    🗑 Anpassungen zurücksetzen
+                </button>
+            </div>
+            <div id="bracketView">
+                <div class="no-results">Lade Bracket-Vorhersage…</div>
+            </div>
+        </div>
+
+        <div id="compareTab" class="tab-content">
+            <div class="compare-controls">
+                <label class="picks-toggle-label">
+                    <input type="checkbox" id="usePicksToggle" onchange="onUsePicksChange(this.checked)">
+                    🔒 Meine Picks &amp; Ausschlüsse verwenden
+                </label>
+                <span class="picks-toggle-hint" id="usePicksHint"></span>
+            </div>
+            <div id="compareGrid">
+                <div class="no-results">Klicke auf „Team Optimieren" um die Vergleichsansicht zu berechnen.</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

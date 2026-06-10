@@ -1,0 +1,25 @@
+# Firebase auth — contains a long-lived refresh token. NEVER commit.
+data/firebase_auth.json
+
+# Disk caches (DVV / GBT bracket / H2H / Firestore-Snapshot)
+data/.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Node (only present because some dev tooling was installed locally)
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+
+# Claude Code working dir (transcripts, agent state, etc.)
+.claude/

@@ -1,0 +1,82 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// One-time Firebase-Auth Setup für den GBT Fantasy Optimizer
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Zweck: Refresh-Token + API-Key aus deiner gbt-fantasy.web.app Sitzung
+// exportieren, damit der Optimizer-Server automatisch Preise und Saison-Daten
+// aus Firestore holen kann (kein manuelles "Preise eintragen" mehr).
+//
+// Schritt-für-Schritt:
+//
+//   1. https://gbt-fantasy.web.app/  öffnen und einloggen.
+//   2. DevTools öffnen (F12)  →  Tab "Console".
+//   3. Den GANZEN Code unten kopieren + einfügen, Enter drücken.
+//   4. Browser bietet einen Download "firebase_auth.json" an.
+//   5. Die Datei nach  data/firebase_auth.json  im Optimizer-Projekt
+//      verschieben (also  gbt-fantasy-optimizer/data/firebase_auth.json ).
+//   6. Server neu starten:  python scripts/serve.py
+//
+// Der Refresh-Token lebt so lange, wie du in der App eingeloggt bleibst —
+// einmaliges Setup reicht für Wochen/Monate. Wenn du dich ausloggst oder
+// das Passwort änderst, muss das Setup wiederholt werden.
+//
+// Die Datei NICHT committen — Refresh-Token ist sensibel.
+// (data/firebase_auth.json steht in .gitignore.)
+// ─────────────────────────────────────────────────────────────────────────────
+
+(async () => {
+    try {
+        // Die App bindet Firebase Auth global als `firebase_auth` ein.
+        // Falls das fehlschlägt → Workaround unten.
+        const auth =
+            (typeof firebase_auth !== 'undefined' && firebase_auth.getAuth?.()) ||
+            (typeof firebase !== 'undefined' && firebase.auth?.());
+
+        if (!auth || !auth.currentUser) {
+            console.error('❌ Kein eingeloggter User gefunden. Bitte erst auf gbt-fantasy.web.app einloggen, dann das Snippet erneut ausführen.');
+            return;
+        }
+        const user = auth.currentUser;
+
+        // Frischer ID-Token sicherstellt, dass tokenManager aktuelle Werte hat.
+        await user.getIdToken(true);
+
+        const tm  = user.stsTokenManager || user._tokenResponse || {};
+        const apiKey =
+            (user.auth && user.auth.config && user.auth.config.apiKey) ||
+            tm.apiKey ||
+            (auth.app && auth.app.options && auth.app.options.apiKey);
+
+        const refreshToken = tm.refreshToken || user.refreshToken;
+        if (!apiKey || !refreshToken) {
+            console.error('❌ Konnte apiKey oder refreshToken nicht aus dem User-Objekt lesen.');
+            console.log('User-Objekt:', user);
+            return;
+        }
+
+        const out = {
+            apiKey,
+            refreshToken,
+            uid:      user.uid,
+            email:    user.email || null,
+            savedAt:  new Date().toISOString(),
+        };
+
+        // Ausgabe in der Konsole (zum Sanity-Check)
+        console.log('✓ firebase_auth.json (in die Zwischenablage)');
+        console.log(JSON.stringify({ ...out, refreshToken: out.refreshToken.slice(0, 12) + '…' }, null, 2));
+
+        // Datei zum Download anbieten
+        const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'firebase_auth.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        console.log('✓ firebase_auth.json wurde heruntergeladen. Verschiebe sie nach data/ und starte den Optimizer-Server neu.');
+    } catch (err) {
+        console.error('❌ Fehler:', err);
+    }
+})();
