@@ -6,7 +6,9 @@ data/firebase_auth.json
 
 # Personal / user-specific data — every user has their own state.
 # These get auto-generated from Firestore + DVV scrapes on first run.
-# (data/players_all.json IS tracked — it's the curated historical roster.)
+# Since the Firestore-multi-year migration, players_all.json is ALSO
+# regenerated (the roster is the union of yearly Firestore overlays).
+data/players_all.json
 data/players_available.json
 data/players_season.json
 data/players_season_*.json

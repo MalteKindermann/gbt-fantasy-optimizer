@@ -1122,6 +1122,13 @@ def simulate_bracket_double_elim(seeded_teams: list[str], rankings: dict,
 # ── Player mapping ────────────────────────────────────────────────────────────
 
 def load_players(path: Path) -> list[dict]:
+    """
+    Optional file. Returnt [] wenn die Datei nicht existiert — sinnvoll seit
+    der Firestore-Multi-Year-Migration, wo `players_all.json` aus dem Repo
+    geflogen ist und Spielerdaten primär aus den Year-Overlays kommen.
+    """
+    if not path.exists():
+        return []
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -1303,9 +1310,10 @@ def sync_players_available_from_brackets(force: bool = False) -> dict:
         if "name" in entry:
             name_to_price[entry["name"].strip()] = entry["price"]
 
-    # Load all players for last-name matching
-    with open(PLAYERS_ALL, encoding="utf-8") as f:
-        all_players = json.load(f)
+    # Load all players for last-name matching. Now optional: jetzt wo die
+    # Year-Overlays von Firestore die primäre Quelle sind, kann players_all.json
+    # fehlen — sync läuft dann allein über fs_season.
+    all_players = load_players(PLAYERS_ALL)
 
     # Augment with Firestore-only players (this-season rookies missing from
     # players_all.json) — same logic as in map_teams_to_players. Without this,
