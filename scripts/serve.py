@@ -69,17 +69,25 @@ _sim_lock = threading.Lock()
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-# Supabase JWT verification is opt-in via the SUPABASE_JWT_SECRET env-var.
+# Supabase JWT verification is opt-in via the SUPABASE_URL env-var.
 # Unset → auth disabled (local/self-host default). Set → every /api/* and
-# /data/* request must carry a valid Bearer token, else 401.
+# /data/* request must carry a valid Bearer token, verified via the project's
+# JWKS endpoint (asymmetric signing keys, the default since 2025).
 
-_SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "").strip()
-_AUTH_ENABLED = bool(_SUPABASE_JWT_SECRET)
+_SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+_AUTH_ENABLED = bool(_SUPABASE_URL)
 
 if _AUTH_ENABLED and _pyjwt is None:
-    print("[fatal] SUPABASE_JWT_SECRET is set but PyJWT is not installed. "
+    print("[fatal] SUPABASE_URL is set but PyJWT is not installed. "
           "Run: pip install -r scripts/requirements.txt", file=sys.stderr)
     sys.exit(1)
+
+_jwks_client = None
+if _AUTH_ENABLED:
+    # PyJWKClient caches fetched keys (default 5 min lifespan). The JWKS
+    # endpoint exposes the project's asymmetric signing keys (typically ES256).
+    _jwks_url = f"{_SUPABASE_URL}/auth/v1/.well-known/jwks.json"
+    _jwks_client = _pyjwt.PyJWKClient(_jwks_url, lifespan=600)
 
 # Paths that never require auth — needed so the login screen can load itself.
 _PUBLIC_PREFIXES = ("/index.html", "/app.js", "/styles.css", "/config.js", "/favicon")
@@ -99,9 +107,13 @@ def _verify_bearer(auth_header: str) -> bool:
         return False
     token = auth_header.split(None, 1)[1].strip()
     try:
-        # Supabase signs with HS256 and the `aud` claim is "authenticated".
+        signing_key = _jwks_client.get_signing_key_from_jwt(token)
+        # Algorithms list covers Supabase's actual choices: ES256 (new default,
+        # ECC P-256), RS256 (alternative), and HS256 (legacy fallback if a
+        # symmetric key ever appears in the JWKS).
         _pyjwt.decode(
-            token, _SUPABASE_JWT_SECRET, algorithms=["HS256"],
+            token, signing_key.key,
+            algorithms=["ES256", "RS256", "HS256"],
             audience="authenticated",
         )
         return True
@@ -408,7 +420,7 @@ if __name__ == "__main__":
     print(f"Serving GBT Fantasy Optimizer on http://localhost:{PORT}")
     print(f"  Static root: {ROOT}")
     print(f"  API: GET /api/sim-status , POST /api/simulate?gender=m|f|all")
-    print(f"  Auth: {'enabled (Supabase JWT)' if _AUTH_ENABLED else 'disabled (no SUPABASE_JWT_SECRET)'}")
+    print(f"  Auth: {'enabled (Supabase JWKS)' if _AUTH_ENABLED else 'disabled (no SUPABASE_URL)'}")
     print(f"  (Ctrl-C to stop)")
     with ReusableServer(("", PORT), Handler) as httpd:
         try:

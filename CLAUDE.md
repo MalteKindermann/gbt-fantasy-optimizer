@@ -59,7 +59,7 @@ Without this the server still works: `firestore_sync` soft-fails to `None`, the 
 | `DATA_DIR` | `<repo>/data` | Where all writable state lives. For Fly/Docker mount a volume here. |
 | `PORT` | `8000` | `serve.py` port. Fly.io sets this to 8080. |
 | `CURRENT_SEASON_YEAR` | system clock year | Override for backtesting or mid-year season transitions. |
-| `SUPABASE_JWT_SECRET` | (unset) | If set, `serve.py` requires `Authorization: Bearer <token>` on `/api/*` and `/data/*` and verifies it (HS256 + `aud=authenticated`). Unset = auth disabled (Self-Host default). |
+| `SUPABASE_URL` | (unset) | If set, `serve.py` requires `Authorization: Bearer <token>` on `/api/*` and `/data/*` and verifies it via the project's JWKS endpoint (`<SUPABASE_URL>/auth/v1/.well-known/jwks.json`, asymmetric ES256/RS256 keys; `aud=authenticated`). Unset = auth disabled (Self-Host default). |
 | `CORS_ALLOW_ORIGIN` | `*` | Sent as `Access-Control-Allow-Origin`. On Fly: set to the Vercel domain so only your frontend can hit the API. |
 
 ## Data flow (the big picture)
@@ -302,7 +302,7 @@ Two runtime modes share one codebase. Switch is purely via config:
 
 | Mode | Frontend | Backend | Persistent state | Auth |
 |---|---|---|---|---|
-| **Self-Host / local** | `python scripts/serve.py` (serves static + API) | same process | local `./data/` dir | **disabled** — `SUPABASE_JWT_SECRET` unset, `config.js` defaults empty |
+| **Self-Host / local** | `python scripts/serve.py` (serves static + API) | same process | local `./data/` dir | **disabled** — `SUPABASE_URL` unset, `config.js` defaults empty |
 | **Cloud** | Vercel (static `index.html` + `app.js` + `styles.css` + `config.js`) | Cloud Run (Docker, scale-to-zero) | GCS bucket mounted at `/data` via gcsfuse | Supabase email/password, server verifies JWT |
 
 **Self-Host promise**: `git clone` + `pip install -r scripts/requirements.txt` + (optional) `.env.local` with Firebase creds + `python scripts/serve.py` → fully working app at `http://localhost:8000`, no login. Docker / Vercel / Supabase / Cloud Run never touched.
@@ -314,8 +314,9 @@ Two runtime modes share one codebase. Switch is purely via config:
 **Backend auth (`scripts/serve.py`)**:
 - CORS headers go out on every response (origin from `$CORS_ALLOW_ORIGIN`, default `*`).
 - `do_OPTIONS` returns 204 for preflight, no auth.
-- `_require_auth_or_401()` runs at the top of `do_GET`/`do_POST`. Skipped when `$SUPABASE_JWT_SECRET` is unset. Static paths (`/`, `/index.html`, `/app.js`, `/config.js`, `/styles.css`, `/favicon*`) are always public so the login screen can load.
-- `pyjwt` is required only when auth is enabled — import is guarded; missing PyJWT with auth enabled is a fatal startup error.
+- `_require_auth_or_401()` runs at the top of `do_GET`/`do_POST`. Skipped when `$SUPABASE_URL` is unset. Static paths (`/`, `/index.html`, `/app.js`, `/config.js`, `/styles.css`, `/favicon*`) are always public so the login screen can load.
+- Verification uses `PyJWKClient` against `<SUPABASE_URL>/auth/v1/.well-known/jwks.json` — Supabase migrated to asymmetric signing keys (default ES256/ECC P-256) in 2025, so HS256 shared-secret verification no longer works for user-issued tokens.
+- `pyjwt[crypto]` is required only when auth is enabled — import is guarded; missing PyJWT with auth enabled is a fatal startup error.
 
 ### Cloud Run + GCS — why this combination
 
@@ -344,7 +345,7 @@ gcloud storage buckets create gs://gbt-fantasy-data --location=us-central1 --uni
 # 3. Store secrets in Secret Manager
 echo -n "<firebase-api-key>"      | gcloud secrets create FIREBASE_API_KEY      --data-file=-
 echo -n "<firebase-refresh-token>"| gcloud secrets create FIREBASE_REFRESH_TOKEN --data-file=-
-echo -n "<supabase-jwt-secret>"   | gcloud secrets create SUPABASE_JWT_SECRET   --data-file=-
+# SUPABASE_URL is public (just the project URL), passed as a plain env-var in the deploy command — no secret needed.
 ```
 
 **Cloud Run deploy** (run from repo root on the `cloud-deploy` branch, after `config.js` is filled in):
@@ -361,8 +362,8 @@ gcloud run deploy gbt-fantasy `
   --max-instances 2 `
   --add-volume name=data,type=cloud-storage,bucket=gbt-fantasy-data `
   --add-volume-mount volume=data,mount-path=/data `
-  --set-env-vars CORS_ALLOW_ORIGIN=https://<your>.vercel.app `
-  --set-secrets FIREBASE_API_KEY=FIREBASE_API_KEY:latest,FIREBASE_REFRESH_TOKEN=FIREBASE_REFRESH_TOKEN:latest,SUPABASE_JWT_SECRET=SUPABASE_JWT_SECRET:latest
+  --set-env-vars CORS_ALLOW_ORIGIN=https://<your>.vercel.app,SUPABASE_URL=https://<proj>.supabase.co `
+  --set-secrets FIREBASE_API_KEY=FIREBASE_API_KEY:latest,FIREBASE_REFRESH_TOKEN=FIREBASE_REFRESH_TOKEN:latest
 ```
 `gcloud run deploy --source .` uses the `Dockerfile` automatically. First deploy takes ~3 min, subsequent ones ~1 min. The output URL goes into `config.js` as `API_BASE`.
 
