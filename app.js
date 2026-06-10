@@ -30,62 +30,158 @@ function fsVal(field) {
     return undefined;
 }
 
-// Loads data/players_season.json (Firestore export of current-season stats).
-// Returns {} if the file is missing or unparseable. Stats from this file override
-// tp/t/mp/pos in players_all.json so the user can swap in a fresh export anytime.
-async function loadSeasonOverrides() {
+// Parse one raw Firestore season doc (`data/players_season_<year>.json` or
+// the legacy `data/players_season.json`) into a flat per-id dict. Returns
+// null if the file is missing/unparseable.
+async function loadOneSeasonFile(path) {
     try {
-        const res = await fetch('data/players_season.json?t=' + Date.now());
-        if (!res.ok) return {};
+        const res = await fetch(path + '?t=' + Date.now());
+        if (!res.ok) return null;
         const doc = await res.json();
         const pl = doc?.fields?.pl?.mapValue?.fields || {};
         const out = {};
         for (const [id, wrap] of Object.entries(pl)) {
             const f = wrap?.mapValue?.fields || {};
             out[id] = {
-                // tp/t/mp/pos are *additive* overlays onto players_all.json.
                 tp:  fsVal(f.tp),
                 t:   fsVal(f.t),
                 mp:  fsVal(f.mp),
                 pos: fsVal(f.pos),
-                // fn/ln/g/ip are needed to SYNTHESIZE entries for Firestore-only
-                // players (rookies absent from players_all.json — e.g. Milan Sievers).
                 fn:  fsVal(f.fn),
                 ln:  fsVal(f.ln),
                 g:   fsVal(f.g),
                 ip:  fsVal(f.ip),
             };
         }
-        window.__seasonMeta = { updatedAt: fsVal(doc?.fields?.ua), count: Object.keys(out).length };
         return out;
     } catch (e) {
-        console.warn('players_season.json konnte nicht geladen werden:', e);
-        return {};
+        console.warn(`${path} konnte nicht geladen werden:`, e);
+        return null;
     }
 }
 
+// Loads ALL season-overlay files: `data/players_season_<year>.json` for every
+// year in 2025..(current+1). Returns:
+//   { byYear: {YYYY: {id: {tp,t,mp,pos,fn,ln,g,ip}}}, years: [...] }
+// Used by loadPlayerData to build the roster and SUM stats across years —
+// no more single-overlay-on-top-of-players_all-static-file design.
+const EARLIEST_SEASON_YEAR = 2025;
+async function loadAllSeasonOverlays() {
+    const currentYear = new Date().getFullYear();
+    const probes = [];
+    for (let y = EARLIEST_SEASON_YEAR; y <= currentYear + 1; y++) {
+        probes.push(loadOneSeasonFile(`data/players_season_${y}.json`)
+            .then(d => ({ year: y, data: d })));
+    }
+    const settled = await Promise.all(probes);
+    const byYear = {};
+    const years = [];
+    for (const { year, data } of settled) {
+        if (data && Object.keys(data).length) {
+            byYear[year] = data;
+            years.push(year);
+        }
+    }
+    // Backward-compat: if no year-suffixed files exist (e.g. fresh checkout
+    // pre-firestore-sync), try the legacy single-file `players_season.json`
+    // and treat it as the current year's overlay.
+    if (years.length === 0) {
+        const legacy = await loadOneSeasonFile('data/players_season.json');
+        if (legacy && Object.keys(legacy).length) {
+            byYear[currentYear] = legacy;
+            years.push(currentYear);
+        }
+    }
+    years.sort();
+    window.__seasonMeta = {
+        years,
+        counts: Object.fromEntries(years.map(y => [y, Object.keys(byYear[y]).length])),
+    };
+    return { byYear, years };
+}
+
 // Re-fetches & rebuilds player tables from JSON. Does NOT trigger sim.
+//
+// Data model (since the Firestore-multi-year migration):
+//   • Roster (which players exist) comes from the UNION of all season-overlay
+//     files (data/players_season_<year>.json). data/players_all.json is
+//     optional and only used as an identity-fallback for players that no
+//     overlay covers (very rare — historical-only entries).
+//   • Stats (tp / t / mp) are SUMMED across all overlay years. No more
+//     "players_all + one overlay" addition — that double-counted as soon as
+//     we cached more than one year.
 async function loadPlayerData() {
     const cacheBust = '?t=' + Date.now();
-    const [allRes, availRes, seasonOverrides] = await Promise.all([
+    const [allRes, availRes, overlays] = await Promise.all([
+        // players_all.json is OPTIONAL now — 404 is fine.
         fetch('data/players_all.json' + cacheBust),
         fetch('data/players_available.json' + cacheBust),
-        loadSeasonOverrides()
+        loadAllSeasonOverlays()
     ]);
-    if (!allRes.ok || !availRes.ok) throw new Error('HTTP error loading player data');
-
-    const rawAll   = await allRes.json();
+    if (!availRes.ok) throw new Error('HTTP error loading players_available.json');
+    const rawAll   = allRes.ok ? await allRes.json() : [];
     const rawAvail = await availRes.json();
 
-    // Index all known players by normalized full name → id. Include the
-    // Firestore-only entries so that names like "Milan Sievers" resolve too.
+    const yearsAsc  = overlays.years.slice();      // ascending
+    const yearsDesc = yearsAsc.slice().reverse();
+
+    // Collect every known player id (union of all overlay years + legacy players_all)
+    const allIds = new Set();
+    for (const y of yearsAsc) Object.keys(overlays.byYear[y]).forEach(id => allIds.add(id));
+    rawAll.forEach(p => allIds.add(p.id));
+
+    // Build the canonical roster: identity from the LATEST year overlay that
+    // has fn/ln for this id, falling back to players_all.json. Stats (tp/t/mp)
+    // are summed across all overlay years.
+    const fullRawAll = [];
+    for (const id of allIds) {
+        // Identity (firstName / lastName / pos / gender / img)
+        let identity = null;
+        for (const y of yearsDesc) {
+            const ov = overlays.byYear[y][id];
+            if (ov && ov.fn && ov.ln) {
+                identity = {
+                    firstName: ov.fn,
+                    lastName:  ov.ln,
+                    pos:       ov.pos || 'Hybrid',
+                    gender:    ov.g   || 'M',
+                    img:       ov.ip  || '',
+                };
+                break;
+            }
+        }
+        if (!identity) {
+            const legacy = rawAll.find(p => p.id === id);
+            if (legacy) {
+                identity = {
+                    firstName: legacy.firstName,
+                    lastName:  legacy.lastName,
+                    pos:       legacy.pos || 'Hybrid',
+                    gender:    legacy.gender || 'M',
+                    img:       legacy.img || '',
+                };
+            }
+        }
+        if (!identity) continue;   // no identity anywhere → skip
+
+        // Sum stats across all available year overlays
+        let tp = 0, t = 0, mp = 0;
+        for (const y of yearsAsc) {
+            const ov = overlays.byYear[y][id];
+            if (ov) {
+                tp += ov.tp ?? 0;
+                t  += ov.t  ?? 0;
+                mp += ov.mp ?? 0;
+            }
+        }
+        fullRawAll.push({ id, ...identity, tp, t, mp });
+    }
+
+    // Index for name → id resolution (used when players_available.json has
+    // legacy `name` entries instead of `id`).
     const norm = (s) => s.trim().toLowerCase().replace(/\s+/g, ' ');
     const nameToId = new Map();
-    rawAll.forEach(p => nameToId.set(norm(p.firstName + ' ' + p.lastName), p.id));
-    // Also map any Firestore-only IDs (their full names come from the overlay)
-    for (const [id, ov] of Object.entries(seasonOverrides)) {
-        if (ov.fn && ov.ln) nameToId.set(norm(`${ov.fn} ${ov.ln}`), id);
-    }
+    fullRawAll.forEach(p => nameToId.set(norm(p.firstName + ' ' + p.lastName), p.id));
 
     const priceMap = new Map();
     const unknown = [];
@@ -100,44 +196,12 @@ async function loadPlayerData() {
     });
 
     if (unknown.length) console.warn('players_available.json: Unbekannte Spieler:', unknown);
-
-    // Synthesize Firestore-only entries — IDs that exist in players_season.json
-    // (the Firestore mirror) but not in players_all.json. Without this, rookies
-    // who only appear in the current season can never be looked up by the UI.
-    const allKnownIds = new Set(rawAll.map(p => p.id));
-    const synthesizedFromFirestore = [];
-    for (const [id, ov] of Object.entries(seasonOverrides)) {
-        if (allKnownIds.has(id)) continue;
-        if (!ov.fn || !ov.ln) continue;   // need at least a name
-        synthesizedFromFirestore.push({
-            id,
-            firstName: ov.fn,
-            lastName:  ov.ln,
-            pos:       ov.pos || 'Hybrid',
-            gender:    ov.g   || 'M',
-            tp:        ov.tp  || 0,
-            t:         ov.t   || 0,
-            mp:        ov.mp  || 0,
-            img:       ov.ip  || '',
-        });
-    }
-    const fullRawAll = [...rawAll, ...synthesizedFromFirestore];
-    if (synthesizedFromFirestore.length) {
-        console.info(`+${synthesizedFromFirestore.length} Spieler nur aus Firestore (nicht in players_all.json):`,
-                     synthesizedFromFirestore.map(p => `${p.firstName} ${p.lastName}`));
+    if (overlays.years.length) {
+        console.info(`Season-Overlays geladen: ${overlays.years.join(', ')} `
+                   + `(${fullRawAll.length} Spieler total)`);
     }
 
-    allPlayers = fullRawAll.map(p => {
-        const ov = seasonOverrides[p.id];
-        const merged = ov ? {
-            ...p,
-            tp:  (p.tp ?? 0) + (ov.tp ?? 0),
-            t:   (p.t  ?? 0) + (ov.t  ?? 0),
-            mp:  (p.mp ?? 0) + (ov.mp ?? 0),
-            pos: ov.pos ?? p.pos,
-        } : p;
-        return buildPlayer(merged, priceMap.get(p.id) ?? null);
-    });
+    allPlayers = fullRawAll.map(p => buildPlayer(p, priceMap.get(p.id) ?? null));
     availablePlayers = allPlayers.filter(p => p.price !== null && p.price > 0);
     computePoolEstimates(availablePlayers);
 

@@ -40,6 +40,7 @@ Public API
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import sys
@@ -62,9 +63,34 @@ CACHE_DIR  = DATA_DIR / ".cache"
 CACHE_FILE = CACHE_DIR / "firestore_season.json"
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
-SECURE_TOKEN_URL = "https://securetoken.googleapis.com/v1/token?key={api_key}"
-FIRESTORE_URL    = ("https://firestore.googleapis.com/v1/projects/gbt-fantasy/"
-                    "databases/(default)/documents/season_stats/2026")
+SECURE_TOKEN_URL  = "https://securetoken.googleapis.com/v1/token?key={api_key}"
+FIRESTORE_URL_TPL = ("https://firestore.googleapis.com/v1/projects/gbt-fantasy/"
+                     "databases/(default)/documents/season_stats/{year}")
+
+# Erstes Jahr, das Firestore zurückblickend hat. Per Probe gefunden — 2024 und
+# älter geben 404. Falls Firestore irgendwann ältere Jahre nachträgt, einfach
+# hier dekrementieren.
+EARLIEST_SEASON_YEAR = 2025
+
+
+def current_season_year() -> int:
+    """
+    Aktuelles Saison-Jahr aus der System-Zeit. Per env-var `CURRENT_SEASON_YEAR`
+    überschreibbar (handy zum Backtesten oder bei Saison-Wechseln mitten im Jahr).
+    """
+    override = os.environ.get("CURRENT_SEASON_YEAR", "").strip()
+    if override.isdigit():
+        return int(override)
+    return datetime.date.today().year
+
+
+def season_years() -> list[int]:
+    """
+    Liste aller Jahre, die wir aus Firestore zu holen versuchen — vom frühesten
+    verfügbaren Jahr bis zum aktuellen Saison-Jahr. Automatisch zukunftssicher:
+    sobald das System-Datum 2027 zeigt, wird auch 2027 mitgesynced.
+    """
+    return list(range(EARLIEST_SEASON_YEAR, current_season_year() + 1))
 
 # ── TTLs ──────────────────────────────────────────────────────────────────────
 SNAPSHOT_TTL_SECONDS = 600   # 10 min — Preise ändern sich relativ selten
@@ -144,27 +170,89 @@ def _refresh_id_token(api_key: str, refresh_token: str) -> str:
     return id_token
 
 
-def _fetch_season_doc(id_token: str) -> dict:
-    """GET das Firestore-Dokument. Returnt das Roh-JSON."""
+def _fetch_season_doc(id_token: str, year: int | None = None) -> dict | None:
+    """
+    GET das `season_stats/<year>`-Dokument. Returnt das Roh-JSON.
+    Spezielle 404-Behandlung: returnt None statt zu werfen, damit aufrufende
+    Stellen sauber zwischen "Jahr existiert nicht" und echten Fehlern trennen
+    können (Auth-Fehler / Netzwerk → RuntimeError).
+    """
+    if year is None:
+        year = current_season_year()
+    url = FIRESTORE_URL_TPL.format(year=year)
     try:
         r = requests.get(
-            FIRESTORE_URL,
+            url,
             headers={"Authorization": f"Bearer {id_token}"},
             timeout=20,
         )
     except requests.RequestException as e:
-        raise RuntimeError(f"Netzwerk-Fehler beim Firestore-Fetch: {e}") from e
+        raise RuntimeError(f"Netzwerk-Fehler beim Firestore-Fetch ({year}): {e}") from e
 
+    if r.status_code == 404:
+        return None
     if r.status_code != 200:
         try:
             err = r.json().get("error", {}).get("message", r.text)
         except Exception:
             err = r.text
         raise RuntimeError(
-            f"Firestore antwortete mit {r.status_code}: {err}. "
+            f"Firestore antwortete mit {r.status_code} (year={year}): {err}. "
             f"Eventuell ID-Token expired oder Berechtigungen nicht ausreichend."
         )
     return r.json()
+
+
+def fetch_archive_season(year: int, force: bool = False) -> dict | None:
+    """
+    Holt ein historisches Saison-Dokument (`season_stats/<year>`) einmalig
+    und speichert es als `data/players_season_<year>.json` (Roh-Firestore-JSON,
+    selbes Format wie `players_season.json`).
+
+    Strategie:
+      • Wenn die Datei bereits existiert und `force=False`: skip — historische
+        Daten ändern sich nicht mehr, deshalb reicht einmal pro Jahr.
+      • Wenn keine Auth-Daten vorhanden: silent skip (returnt None).
+      • Wenn Firestore 404 antwortet (Jahr existiert nicht): logge das, returnt None.
+
+    Returnt den geparsten dict (`{id: {firstName, lastName, ...}}`) oder None.
+    """
+    target = DATA_DIR / f"players_season_{year}.json"
+    if target.exists() and not force:
+        # Bereits gecacht — direkt aus der Datei lesen (kein Netzwerk-Roundtrip).
+        try:
+            with open(target, encoding="utf-8") as f:
+                return parse_season_players(json.load(f))
+        except Exception as e:
+            print(f"  WARNING: konnte {target.name} nicht lesen, hole neu: {e}",
+                  file=sys.stderr)
+
+    auth = _load_auth()
+    if auth is None:
+        return None
+
+    try:
+        id_token = _refresh_id_token(auth["apiKey"], auth["refreshToken"])
+        raw_doc  = _fetch_season_doc(id_token, year=year)
+    except RuntimeError as e:
+        print(f"  ⚠ Archive-Fetch fehlgeschlagen ({year}): {e}", file=sys.stderr)
+        return None
+
+    if raw_doc is None:
+        print(f"  ℹ season_stats/{year} existiert nicht in Firestore — überspringe.")
+        return None
+
+    # Roh-Doc auf Disk schreiben (Frontend kann es später überlagern)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(raw_doc, f, ensure_ascii=False, indent=2)
+        print(f"  ✓ Archive {year}: {len(raw_doc.get('fields',{}).get('pl',{}).get('mapValue',{}).get('fields',{}))} "
+              f"Spieler nach data/{target.name} gespeichert.")
+    except Exception as e:
+        print(f"  WARNING: konnte {target.name} nicht schreiben: {e}", file=sys.stderr)
+
+    return parse_season_players(raw_doc)
 
 
 # ── Parser für typed-value-Bäume ──────────────────────────────────────────────
@@ -286,19 +374,41 @@ def fetch_firestore_season(force: bool = False) -> dict[str, dict] | None:
         # robust für User, die nur den lokalen Workflow nutzen wollen.
         return None
 
+    current_year = current_season_year()
     id_token  = _refresh_id_token(auth["apiKey"], auth["refreshToken"])
-    raw_doc   = _fetch_season_doc(id_token)
+    raw_doc   = _fetch_season_doc(id_token, year=current_year)
+    if raw_doc is None:
+        raise RuntimeError(
+            f"season_stats/{current_year} existiert nicht in Firestore — "
+            f"falls die Saison schon angelegt sein sollte, "
+            f"setze CURRENT_SEASON_YEAR per env-var.")
     players   = parse_season_players(raw_doc)
     _save_snapshot(players)
-    # Also mirror the raw Firestore document to data/players_season.json, so
-    # the frontend's loadSeasonOverlay can pick up new players (e.g. rookies
-    # like Milan Sievers who only exist in Firestore, not in players_all.json).
-    try:
-        with open(DATA_DIR / "players_season.json", "w", encoding="utf-8") as f:
-            json.dump(raw_doc, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"  WARNING: konnte data/players_season.json nicht schreiben: {e}",
-              file=sys.stderr)
+    # Spiegele das Roh-Doc nach data/players_season_<year>.json UND nach dem
+    # legacy-Pfad data/players_season.json (für Backward-Compat mit dem
+    # bestehenden Frontend, das nur den einen Pfad kennt). Beide Dateien sind
+    # gitignored.
+    for target_name in (f"players_season_{current_year}.json",
+                         "players_season.json"):
+        try:
+            with open(DATA_DIR / target_name, "w", encoding="utf-8") as f:
+                json.dump(raw_doc, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"  WARNING: konnte data/{target_name} nicht schreiben: {e}",
+                  file=sys.stderr)
+
+    # Archive-Jahre einmalig nachholen — alle Jahre von EARLIEST_SEASON_YEAR
+    # bis (current_year - 1). File-exists Check macht das idempotent: einmal
+    # pro Jahr gefetched, danach ewig gecacht.
+    for year in season_years():
+        if year == current_year:
+            continue   # wir haben das aktuelle Jahr gerade frisch geholt
+        try:
+            fetch_archive_season(year)
+        except Exception as e:
+            print(f"  WARNING: Archive-Fetch {year} fehlgeschlagen: {e}",
+                  file=sys.stderr)
+
     return players
 
 

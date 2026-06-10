@@ -9,6 +9,7 @@ data/firebase_auth.json
 # (data/players_all.json IS tracked — it's the curated historical roster.)
 data/players_available.json
 data/players_season.json
+data/players_season_*.json
 data/tournament_sim.json
 data/bracket_m.json
 data/bracket_f.json
