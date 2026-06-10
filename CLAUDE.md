@@ -307,7 +307,9 @@ Two runtime modes share one codebase. Switch is purely via config:
 
 **Self-Host promise**: `git clone` + `pip install -r scripts/requirements.txt` + (optional) `.env.local` with Firebase creds + `python scripts/serve.py` → fully working app at `http://localhost:8000`, no login. Docker / Vercel / Supabase / Cloud Run never touched.
 
-**Front-end config (`config.js`)**: the only file to edit for a Cloud deploy. Sets three globals — `window.API_BASE`, `window.SUPABASE_URL`, `window.SUPABASE_ANON_KEY`. All empty by default ⇒ self-host mode. Loaded **before** `app.js`. `app.js`'s `apiFetch(path, opts)` wraps every server call: prefixes `/api/*` and `/data/*` with `API_BASE` and attaches `Authorization: Bearer <jwt>` if a Supabase session is active.
+**Front-end config (`config.js`)**: sets three globals — `window.API_BASE`, `window.SUPABASE_URL`, `window.SUPABASE_ANON_KEY`. All empty by default in git ⇒ self-host mode. Loaded **before** `app.js`. `app.js`'s `apiFetch(path, opts)` wraps every server call: prefixes `/api/*` and `/data/*` with `API_BASE` and attaches `Authorization: Bearer <jwt>` if a Supabase session is active.
+
+**Vercel build-time injection**: in cloud deploy, `vercel.json` runs `node scripts/generate-config.js` as the build command. That script reads env vars (`API_BASE`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`) from the Vercel project and rewrites `config.js` with real values. Env vars are set once in the Vercel dashboard (Settings → Environment Variables) and never live in git. Self-host clones don't run the script — they get the empty committed file.
 
 **Login gate**: `app.js` at the bottom checks `supa` (the Supabase client; null when `SUPABASE_URL` is empty). If null → `_startApp()` runs immediately, login overlay never appears. Otherwise → `supa.auth.getSession()` decides whether to show the overlay or boot the app. `onAuthStateChange` re-gates on logout.
 
