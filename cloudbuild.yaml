@@ -1,0 +1,43 @@
+# Cloud Build pipeline triggered on push to the `cloud-deploy` branch.
+# Build the container image, push it to Artifact Registry, and update the
+# existing Cloud Run service to point at the new image. Using
+# `gcloud run services update --image=...` (rather than `gcloud run deploy
+# --source .`) preserves the GCS volume mount, env vars, and secrets that
+# were configured once via YAML — only the image revision changes.
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/gbt-fantasy-optimizer:$SHORT_SHA
+      - --tag
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/gbt-fantasy-optimizer:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/gbt-fantasy-optimizer
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - gbt-fantasy-optimizer
+      - --region=us-central1
+      - --image=us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/gbt-fantasy-optimizer:$SHORT_SHA
+      - --quiet
+
+# Cloud Build SA does not have a default logs bucket in newer projects;
+# CLOUD_LOGGING_ONLY skips the bucket requirement entirely.
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s
