@@ -7,10 +7,36 @@
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+    <!-- Login-Overlay. Wird nur sichtbar wenn config.js eine Supabase-URL setzt
+         UND keine aktive Session vorhanden ist. Im Self-Host-Modus bleibt das
+         Overlay komplett unsichtbar — siehe app.js / DOMContentLoaded. -->
+    <div id="loginOverlay" hidden>
+        <div class="login-card">
+            <h2>🏐 GBT Fantasy Optimizer</h2>
+            <p class="login-subtitle">Bitte einloggen</p>
+            <form id="loginForm">
+                <label>
+                    E-Mail
+                    <input type="email" id="loginEmail" required autocomplete="email">
+                </label>
+                <label>
+                    Passwort
+                    <input type="password" id="loginPassword" required autocomplete="current-password">
+                </label>
+                <button class="btn" type="submit">Einloggen</button>
+                <div class="login-error" id="loginError" hidden></div>
+            </form>
+        </div>
+    </div>
+
     <div class="container">
         <header>
             <h1>🏐 GBT Fantasy Optimizer</h1>
             <p class="subtitle">Statistisch optimales Team für German Beach Tour 2025</p>
+            <button id="logoutBtn" class="btn-inline btn-inline-ghost" hidden
+                    onclick="logoutUser()" style="font-size:0.8rem">
+                Abmelden
+            </button>
         </header>
 
         <div class="controls">
@@ -111,6 +137,8 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="config.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

@@ -23,6 +23,11 @@ import time
 import urllib.parse
 from pathlib import Path
 
+try:
+    import jwt as _pyjwt  # pyjwt
+except ImportError:
+    _pyjwt = None
+
 # Allow importing from same directory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _env import load_dotenv_files  # noqa: E402
@@ -61,6 +66,47 @@ _ensure_runtime_stubs()
 
 # Single-flight: never run two simulations at once
 _sim_lock = threading.Lock()
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+# Supabase JWT verification is opt-in via the SUPABASE_JWT_SECRET env-var.
+# Unset → auth disabled (local/self-host default). Set → every /api/* and
+# /data/* request must carry a valid Bearer token, else 401.
+
+_SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET", "").strip()
+_AUTH_ENABLED = bool(_SUPABASE_JWT_SECRET)
+
+if _AUTH_ENABLED and _pyjwt is None:
+    print("[fatal] SUPABASE_JWT_SECRET is set but PyJWT is not installed. "
+          "Run: pip install -r scripts/requirements.txt", file=sys.stderr)
+    sys.exit(1)
+
+# Paths that never require auth — needed so the login screen can load itself.
+_PUBLIC_PREFIXES = ("/index.html", "/app.js", "/styles.css", "/config.js", "/favicon")
+
+
+def _path_is_public(path: str) -> bool:
+    p = path.split("?", 1)[0]
+    if p == "/" or p == "":
+        return True
+    return any(p == pfx or p.startswith(pfx) for pfx in _PUBLIC_PREFIXES)
+
+
+def _verify_bearer(auth_header: str) -> bool:
+    if not _AUTH_ENABLED:
+        return True
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        return False
+    token = auth_header.split(None, 1)[1].strip()
+    try:
+        # Supabase signs with HS256 and the `aud` claim is "authenticated".
+        _pyjwt.decode(
+            token, _SUPABASE_JWT_SECRET, algorithms=["HS256"],
+            audience="authenticated",
+        )
+        return True
+    except Exception:
+        return False
 
 
 def _read_sim() -> dict | None:
@@ -115,6 +161,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if not self._require_auth_or_401():
+            return
         if self.path.startswith("/api/sim-status"):
             self._send_json(200, sim_status())
             return
@@ -125,6 +173,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def end_headers(self):
+        # CORS — required when frontend (Vercel) and backend (Fly) are on
+        # different origins. Defaults to "*" for local/self-host.
+        origin = os.environ.get("CORS_ALLOW_ORIGIN", "*")
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        if origin != "*":
+            self.send_header("Vary", "Origin")
         # Disable caching for assets that change during dev (everything served by us)
         # — prevents stale app.js / index.html / json after edits
         if any(self.path.endswith(ext) for ext in (".js", ".html", ".json", ".css")) \
@@ -133,7 +189,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Pragma", "no-cache")
         super().end_headers()
 
+    def do_OPTIONS(self):
+        # CORS preflight — no body, no auth.
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _require_auth_or_401(self) -> bool:
+        """Return True if request is allowed to proceed. Sends 401 itself otherwise."""
+        if not _AUTH_ENABLED:
+            return True
+        if _path_is_public(self.path):
+            return True
+        if _verify_bearer(self.headers.get("Authorization", "")):
+            return True
+        self._send_json(401, {"error": "auth required"})
+        return False
+
     def do_POST(self):
+        if not self._require_auth_or_401():
+            return
         path, _, query = self.path.partition("?")
         params = urllib.parse.parse_qs(query)
 
@@ -333,6 +408,7 @@ if __name__ == "__main__":
     print(f"Serving GBT Fantasy Optimizer on http://localhost:{PORT}")
     print(f"  Static root: {ROOT}")
     print(f"  API: GET /api/sim-status , POST /api/simulate?gender=m|f|all")
+    print(f"  Auth: {'enabled (Supabase JWT)' if _AUTH_ENABLED else 'disabled (no SUPABASE_JWT_SECRET)'}")
     print(f"  (Ctrl-C to stop)")
     with ReusableServer(("", PORT), Handler) as httpd:
         try:

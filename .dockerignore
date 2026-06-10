@@ -1,0 +1,12 @@
+data/
+.env
+.env.local
+.git/
+.gitignore
+.idea/
+.vscode/
+.claude/
+__pycache__/
+**/__pycache__/
+*.pyc
+README.md

@@ -1707,3 +1707,48 @@ input:focus, select:focus {
     margin-top: 0.2rem;
     opacity: 0.85;
 }
+
+
+/* ── Login overlay ──────────────────────────────────────────────────────── */
+#loginOverlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.75);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999;
+}
+#loginOverlay[hidden] { display: none; }
+.login-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2rem;
+    width: min(360px, 90vw);
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+}
+.login-card h2 { margin: 0 0 0.25rem; font-size: 1.4rem; }
+.login-subtitle { color: var(--text-dim); margin: 0 0 1.25rem; font-size: 0.9rem; }
+#loginForm label {
+    display: block;
+    margin-bottom: 0.85rem;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+#loginForm input {
+    display: block;
+    width: 100%;
+    margin-top: 0.3rem;
+    padding: 0.55rem 0.7rem;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 0.95rem;
+    box-sizing: border-box;
+}
+#loginForm .btn { width: 100%; margin-top: 0.5rem; }
+.login-error {
+    margin-top: 0.75rem;
+    color: var(--error);
+    font-size: 0.85rem;
+    text-align: center;
+}

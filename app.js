@@ -1,5 +1,48 @@
 // GBT Fantasy Team Optimizer
 
+// ── API base + Auth ───────────────────────────────────────────────────────────
+// Both come from `window.*` set by config.js (loaded before this script). When
+// SUPABASE_URL is empty, auth is fully disabled (Self-Host default). When
+// API_BASE is empty, fetches are relative (same-origin) — same default.
+
+const API_BASE     = (window.API_BASE     || '').replace(/\/$/, '');
+const SUPABASE_URL = window.SUPABASE_URL  || '';
+const SUPABASE_KEY = window.SUPABASE_ANON_KEY || '';
+const AUTH_ENABLED = !!(SUPABASE_URL && SUPABASE_KEY);
+
+// Lazily initialised Supabase client. Null when auth is disabled.
+const supa = AUTH_ENABLED && window.supabase
+    ? window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+        auth: { persistSession: true, autoRefreshToken: true },
+    })
+    : null;
+
+// Wraps fetch():
+//  • Prefixes /api/* and data/* paths with API_BASE (if set).
+//  • Attaches Authorization: Bearer <token> when a Supabase session exists.
+async function apiFetch(path, opts = {}) {
+    let url = path;
+    if (API_BASE && (path.startsWith('/api/') || path.startsWith('/data/') || path.startsWith('data/'))) {
+        const p = path.startsWith('/') ? path : '/' + path;
+        url = API_BASE + p;
+    }
+    const headers = new Headers(opts.headers || {});
+    if (supa) {
+        try {
+            const { data } = await supa.auth.getSession();
+            const tok = data?.session?.access_token;
+            if (tok) headers.set('Authorization', 'Bearer ' + tok);
+        } catch (_) { /* no session — request proceeds unauthenticated */ }
+    }
+    return fetch(url, { ...opts, headers });
+}
+
+async function logoutUser() {
+    if (!supa) return;
+    try { await supa.auth.signOut(); } catch (_) {}
+    // onAuthStateChange handler will re-show the login overlay.
+}
+
 let allPlayers = [];
 let availablePlayers = [];
 let optimalTeam = null;
@@ -35,7 +78,7 @@ function fsVal(field) {
 // null if the file is missing/unparseable.
 async function loadOneSeasonFile(path) {
     try {
-        const res = await fetch(path + '?t=' + Date.now());
+        const res = await apiFetch(path + '?t=' + Date.now());
         if (!res.ok) return null;
         const doc = await res.json();
         const pl = doc?.fields?.pl?.mapValue?.fields || {};
@@ -114,8 +157,8 @@ async function loadPlayerData() {
     const cacheBust = '?t=' + Date.now();
     const [allRes, availRes, overlays] = await Promise.all([
         // players_all.json is OPTIONAL now — 404 is fine.
-        fetch('data/players_all.json' + cacheBust),
-        fetch('data/players_available.json' + cacheBust),
+        apiFetch('data/players_all.json' + cacheBust),
+        apiFetch('data/players_available.json' + cacheBust),
         loadAllSeasonOverlays()
     ]);
     if (!availRes.ok) throw new Error('HTTP error loading players_available.json');
@@ -265,7 +308,7 @@ function hideSimBanner() {
 
 async function loadSimFile() {
     try {
-        const res = await fetch('data/tournament_sim.json?t=' + Date.now());
+        const res = await apiFetch('data/tournament_sim.json?t=' + Date.now());
         if (!res.ok) return false;
         tournamentSim = await res.json();
         applySimData();
@@ -377,7 +420,7 @@ async function pickAmbiguous(el) {
 
     el.style.opacity = '0.5';
     try {
-        const r = await fetch('/api/swap-player', {
+        const r = await apiFetch('/api/swap-player', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ from, to })
@@ -504,7 +547,7 @@ async function savePrices() {
     }
 
     try {
-        const r = await fetch('/api/set-prices', {
+        const r = await apiFetch('/api/set-prices', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ prices: updates }),
@@ -622,7 +665,7 @@ async function ensureTournamentSim() {
     // Check status — needs the Python server (serve.py). If not running, fall back to file-only mode.
     let status = null;
     try {
-        const r = await fetch('/api/sim-status');
+        const r = await apiFetch('/api/sim-status');
         if (r.ok) status = await r.json();
     } catch (_) { /* serve.py not running */ }
 
@@ -649,7 +692,7 @@ async function ensureTournamentSim() {
     showSimBanner(`Turnier-Prognose wird berechnet (${reason})…`, 'loading');
 
     try {
-        const r = await fetch('/api/simulate?gender=all', { method: 'POST' });
+        const r = await apiFetch('/api/simulate?gender=all', { method: 'POST' });
         if (!r.ok) throw new Error('simulate failed: ' + r.status);
         const result = await r.json();
         await loadSimFile();
@@ -663,7 +706,7 @@ async function ensureTournamentSim() {
 async function refreshSim() {
     // First make sure the API server is actually running
     try {
-        const status = await fetch('/api/sim-status');
+        const status = await apiFetch('/api/sim-status');
         if (!status.ok) throw new Error('no api');
     } catch (_) {
         showSimBanner(
@@ -676,7 +719,7 @@ async function refreshSim() {
 
     showSimBanner('Prognose wird neu berechnet (lädt DVV / Bracket / H2H neu)…', 'loading');
     try {
-        const r = await fetch('/api/simulate?gender=all&force=1', { method: 'POST' });
+        const r = await apiFetch('/api/simulate?gender=all&force=1', { method: 'POST' });
         if (!r.ok) {
             const txt = await r.text();
             throw new Error(`HTTP ${r.status} — ${txt.slice(0, 120)}`);
@@ -697,7 +740,7 @@ async function refreshSim() {
 // Setup-Anleitung in `fetch_auth_token.txt`.
 async function refreshFirestorePrices() {
     try {
-        const status = await fetch('/api/sim-status');
+        const status = await apiFetch('/api/sim-status');
         if (!status.ok) throw new Error('no api');
     } catch (_) {
         showSimBanner('⚠ Server nicht erreichbar — bitte <code>python scripts/serve.py</code> starten.', 'warn');
@@ -706,7 +749,7 @@ async function refreshFirestorePrices() {
 
     showSimBanner('Lade Preise aus Firestore…', 'loading');
     try {
-        const r = await fetch('/api/firestore-sync?force=1', { method: 'POST' });
+        const r = await apiFetch('/api/firestore-sync?force=1', { method: 'POST' });
         const result = await r.json().catch(() => ({}));
         if (!r.ok) {
             // 401 = no auth setup yet — friendlier guidance, with a link to the snippet file.
@@ -2712,4 +2755,62 @@ function initBracketGenderToggle() {
 
 initPlayerFilters();
 initBracketGenderToggle();
-loadData();
+
+// ── App start: bypass login when Supabase isn't configured (Self-Host) ──
+function _startApp() {
+    const lo = document.getElementById('loginOverlay');
+    if (lo) lo.hidden = true;
+    loadData();
+}
+
+function _showLogin() {
+    const lo = document.getElementById('loginOverlay');
+    if (lo) lo.hidden = false;
+    const btn = document.getElementById('logoutBtn');
+    if (btn) btn.hidden = true;
+}
+
+if (!supa) {
+    // No Supabase configured → start immediately, never show login.
+    _startApp();
+} else {
+    // Cloud mode: gate the app behind a Supabase session.
+    const btn = document.getElementById('logoutBtn');
+    if (btn) btn.hidden = false;
+
+    const form = document.getElementById('loginForm');
+    if (form) {
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('loginEmail').value.trim();
+            const password = document.getElementById('loginPassword').value;
+            const errEl = document.getElementById('loginError');
+            errEl.hidden = true;
+            const { error } = await supa.auth.signInWithPassword({ email, password });
+            if (error) {
+                errEl.textContent = 'Login fehlgeschlagen: ' + error.message;
+                errEl.hidden = false;
+            }
+            // Successful login fires onAuthStateChange below.
+        });
+    }
+
+    let _appStarted = false;
+    supa.auth.onAuthStateChange((_event, session) => {
+        if (session) {
+            if (!_appStarted) { _appStarted = true; _startApp(); }
+        } else {
+            _appStarted = false;
+            _showLogin();
+        }
+    });
+
+    supa.auth.getSession().then(({ data }) => {
+        if (data?.session) {
+            _appStarted = true;
+            _startApp();
+        } else {
+            _showLogin();
+        }
+    });
+}

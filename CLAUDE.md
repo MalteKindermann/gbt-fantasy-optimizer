@@ -59,6 +59,8 @@ Without this the server still works: `firestore_sync` soft-fails to `None`, the 
 | `DATA_DIR` | `<repo>/data` | Where all writable state lives. For Fly/Docker mount a volume here. |
 | `PORT` | `8000` | `serve.py` port. Fly.io sets this to 8080. |
 | `CURRENT_SEASON_YEAR` | system clock year | Override for backtesting or mid-year season transitions. |
+| `SUPABASE_JWT_SECRET` | (unset) | If set, `serve.py` requires `Authorization: Bearer <token>` on `/api/*` and `/data/*` and verifies it (HS256 + `aud=authenticated`). Unset = auth disabled (Self-Host default). |
+| `CORS_ALLOW_ORIGIN` | `*` | Sent as `Access-Control-Allow-Origin`. On Fly: set to the Vercel domain so only your frontend can hit the API. |
 
 ## Data flow (the big picture)
 
@@ -294,8 +296,90 @@ Two distinct mechanisms — keep them separate when adding new banners:
 - **`data/` writes must go through `data_dir()`** (in `scripts/_env.py`), never hardcoded `ROOT / "data"` — the Fly-deploy path relies on `$DATA_DIR` pointing at a mounted volume.
 - Don't commit anything under `data/`. The `.gitignore` whitelists nothing — the directory is meant to be machine-local state.
 
+## Deployment (Vercel + Google Cloud Run + Supabase)
+
+Two runtime modes share one codebase. Switch is purely via config:
+
+| Mode | Frontend | Backend | Persistent state | Auth |
+|---|---|---|---|---|
+| **Self-Host / local** | `python scripts/serve.py` (serves static + API) | same process | local `./data/` dir | **disabled** — `SUPABASE_JWT_SECRET` unset, `config.js` defaults empty |
+| **Cloud** | Vercel (static `index.html` + `app.js` + `styles.css` + `config.js`) | Cloud Run (Docker, scale-to-zero) | GCS bucket mounted at `/data` via gcsfuse | Supabase email/password, server verifies JWT |
+
+**Self-Host promise**: `git clone` + `pip install -r scripts/requirements.txt` + (optional) `.env.local` with Firebase creds + `python scripts/serve.py` → fully working app at `http://localhost:8000`, no login. Docker / Vercel / Supabase / Cloud Run never touched.
+
+**Front-end config (`config.js`)**: the only file to edit for a Cloud deploy. Sets three globals — `window.API_BASE`, `window.SUPABASE_URL`, `window.SUPABASE_ANON_KEY`. All empty by default ⇒ self-host mode. Loaded **before** `app.js`. `app.js`'s `apiFetch(path, opts)` wraps every server call: prefixes `/api/*` and `/data/*` with `API_BASE` and attaches `Authorization: Bearer <jwt>` if a Supabase session is active.
+
+**Login gate**: `app.js` at the bottom checks `supa` (the Supabase client; null when `SUPABASE_URL` is empty). If null → `_startApp()` runs immediately, login overlay never appears. Otherwise → `supa.auth.getSession()` decides whether to show the overlay or boot the app. `onAuthStateChange` re-gates on logout.
+
+**Backend auth (`scripts/serve.py`)**:
+- CORS headers go out on every response (origin from `$CORS_ALLOW_ORIGIN`, default `*`).
+- `do_OPTIONS` returns 204 for preflight, no auth.
+- `_require_auth_or_401()` runs at the top of `do_GET`/`do_POST`. Skipped when `$SUPABASE_JWT_SECRET` is unset. Static paths (`/`, `/index.html`, `/app.js`, `/config.js`, `/styles.css`, `/favicon*`) are always public so the login screen can load.
+- `pyjwt` is required only when auth is enabled — import is guarded; missing PyJWT with auth enabled is a fatal startup error.
+
+### Cloud Run + GCS — why this combination
+
+Cloud Run is stateless: container restarts wipe local FS. The app writes user-edited prices (`players_available.json`), sim output, and disk caches under `/data`, so we need persistence. Cloud Run gen2 supports mounting a GCS bucket as a directory via gcsfuse (GA since 2024) — `DATA_DIR=/data` keeps working unchanged.
+
+**Free-tier fit (region `us-central1`, billing account required but bill stays €0)**:
+- Cloud Run: 2M requests + 360k GiB-s memory + 180k vCPU-s per month
+- Cloud Storage: 5 GB-months Standard in US-regions, 5k Class-A ops, 50k Class-B ops, 100 GB egress
+- Cloud Build: 120 build-min/day (used when `gcloud run deploy --source .` builds the image)
+
+Our actual usage: <100 MB data, hundreds of ops/month, single-digit deploys. All comfortably inside the free tier.
+
+### Deploy steps
+
+**Supabase** (once): create a free project → Authentication → Users → "Add user" with email+password. Settings → Auth → disable email confirmations. From Settings → API copy `Project URL`, `anon public`, and `JWT Secret`.
+
+**Google Cloud** (once):
+```powershell
+# 1. Create project + enable APIs
+gcloud projects create gbt-fantasy --set-as-default
+gcloud services enable run.googleapis.com storage.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com
+
+# 2. Create GCS bucket for /data (must be us-central1 to stay free)
+gcloud storage buckets create gs://gbt-fantasy-data --location=us-central1 --uniform-bucket-level-access
+
+# 3. Store secrets in Secret Manager
+echo -n "<firebase-api-key>"      | gcloud secrets create FIREBASE_API_KEY      --data-file=-
+echo -n "<firebase-refresh-token>"| gcloud secrets create FIREBASE_REFRESH_TOKEN --data-file=-
+echo -n "<supabase-jwt-secret>"   | gcloud secrets create SUPABASE_JWT_SECRET   --data-file=-
+```
+
+**Cloud Run deploy** (run from repo root on the `cloud-deploy` branch, after `config.js` is filled in):
+```powershell
+gcloud run deploy gbt-fantasy `
+  --source . `
+  --region us-central1 `
+  --allow-unauthenticated `
+  --memory 512Mi `
+  --cpu 1 `
+  --timeout 600 `
+  --concurrency 80 `
+  --min-instances 0 `
+  --max-instances 2 `
+  --add-volume name=data,type=cloud-storage,bucket=gbt-fantasy-data `
+  --add-volume-mount volume=data,mount-path=/data `
+  --set-env-vars CORS_ALLOW_ORIGIN=https://<your>.vercel.app `
+  --set-secrets FIREBASE_API_KEY=FIREBASE_API_KEY:latest,FIREBASE_REFRESH_TOKEN=FIREBASE_REFRESH_TOKEN:latest,SUPABASE_JWT_SECRET=SUPABASE_JWT_SECRET:latest
+```
+`gcloud run deploy --source .` uses the `Dockerfile` automatically. First deploy takes ~3 min, subsequent ones ~1 min. The output URL goes into `config.js` as `API_BASE`.
+
+**One-time grant** so the service account can mount the bucket:
+```powershell
+$PROJECT_NUM=$(gcloud projects describe gbt-fantasy --format="value(projectNumber)")
+gcloud storage buckets add-iam-policy-binding gs://gbt-fantasy-data `
+  --member="serviceAccount:$PROJECT_NUM-compute@developer.gserviceaccount.com" `
+  --role="roles/storage.objectUser"
+```
+
+**Vercel**: connect the repo with **Branch = `cloud-deploy`**, no build command, output dir empty. On `cloud-deploy`, edit `config.js` to hold the Cloud Run URL + Supabase URL + anon key, commit, push. Vercel deploys automatically.
+
+Self-Host users only ever pull `main`, which keeps `config.js` empty — so a fresh clone can never accidentally point at the cloud instance.
+
 ## Repo & branches
 
-- `main` — primary working branch.
-- `fly-deploy` — held in sync with `main` and used for Fly.io-specific commits (Dockerfile, `fly.toml`, etc.) once those land. Anything not Docker/Fly-specific belongs on `main`.
+- `main` — primary working branch. `config.js` here always has **empty** defaults (Self-Host mode).
+- `cloud-deploy` — Cloud Run / Vercel deployment branch. Holds the `Dockerfile`, `.dockerignore`, `vercel.json`, and the **filled-in** `config.js` with real Cloud Run + Supabase URLs. Updates land here via `git checkout cloud-deploy && git merge main` (resolve the `config.js` conflict in favor of the cloud values).
 - History has been rewritten with `git filter-repo` to scrub stale `data/*.json` snapshots. If you ever need to do another scrub, the executable is at `~/AppData/Roaming/Python/Python311/Scripts/git-filter-repo.exe` (Windows install via `pip install --user git-filter-repo`).
