@@ -532,48 +532,65 @@ def build_bracket(gender: str, force: bool = False,
     matches = fetch_spielplan(tid, qualifier=False, force=force)
 
     teams: dict[str, dict] = {}
+    qualifier_entries: list[dict] = []  # rows with non-numeric (Q…) seeds in the main Setzliste
     for entry in setz:
         seed = entry["seed"]
-        teams[seed] = {
-            "seeding": seed,
-            "players": entry["players"],
-            # Extra-Metadaten, die Downstream ignorieren darf:
-            "teamId":     entry.get("team_id"),
-            "club":       entry.get("club"),
-            "dvvPoints":  entry.get("dvv_points"),
-        }
-
-    # Many GBT main draws are listed with only 6 seeded teams in the Setzliste
-    # — slots 7 and 8 are reserved for the two qualifier winners. Until quali
-    # is decided we fill these with placeholders (best-effort: top-seeded
-    # qualifier teams, since those most often win). This keeps the 8-team
-    # rules template applicable, so the bracket can already be rendered.
-    numeric_seeds = sorted(int(s) for s in teams.keys() if s.isdigit())
-    if numeric_seeds == [1, 2, 3, 4, 5, 6]:
-        quali = fetch_setzliste(tid, qualifier=True, force=force)
-        # Top-seeded qualifiers fill seed 7 + 8 as a best-guess placeholder.
-        # We tag the players list with a trailing 'Q' marker so downstream
-        # code can recognize them and the UI can show "(Quali)" if it wants.
-        q_teams = quali[:2]
-        for idx, q in enumerate(q_teams):
-            seed = str(7 + idx)
-            teams[seed] = {
-                "seeding":   seed,
-                "players":   q["players"] or [f"Q{idx+1}"],
-                "teamId":    q.get("team_id"),
-                "club":      q.get("club"),
-                "dvvPoints": q.get("dvv_points"),
-                "qualiPending": True,   # signal placeholder
-            }
-        # Pad up to 8 with bare 'Q'-placeholders if the qualifier Setzliste
-        # came back empty or short.
-        for idx in range(len(q_teams), 2):
-            seed = str(7 + idx)
+        if seed.isdigit():
             teams[seed] = {
                 "seeding": seed,
-                "players": [f"Q{idx+1}"],
-                "qualiPending": True,
+                "players": entry["players"],
+                "teamId":     entry.get("team_id"),
+                "club":       entry.get("club"),
+                "dvvPoints":  entry.get("dvv_points"),
             }
+        else:
+            qualifier_entries.append(entry)
+
+    # GBT main draws list 6 seeded teams initially (1–6); slots 7 + 8 are
+    # reserved for the two qualifier winners. Two cases when seeds 7/8 are
+    # missing from the numeric set:
+    #
+    #  (a) Quallie is done — DVV adds the winners to the main Setzliste, but
+    #      keeps their original Q-seed (e.g. "Q1", "Q2"). Promote those to
+    #      numeric seeds 7/8 — they are real, not placeholders.
+    #
+    #  (b) Quallie is still pending — main Setzliste has only 6 rows, no
+    #      Q-entries. Best-guess placeholder: top-2 seeded teams from the
+    #      qualifier Setzliste, tagged `qualiPending=True`.
+    numeric_seeds = sorted(int(s) for s in teams.keys() if s.isdigit())
+    if numeric_seeds == [1, 2, 3, 4, 5, 6]:
+        if len(qualifier_entries) >= 2:
+            # Case (a): promote real qualifier winners from the main Setzliste.
+            for idx, q in enumerate(qualifier_entries[:2]):
+                seed = str(7 + idx)
+                teams[seed] = {
+                    "seeding":   seed,
+                    "players":   q["players"],
+                    "teamId":    q.get("team_id"),
+                    "club":      q.get("club"),
+                    "dvvPoints": q.get("dvv_points"),
+                }
+        else:
+            # Case (b): placeholder from the qualifier Setzliste.
+            quali = fetch_setzliste(tid, qualifier=True, force=force)
+            q_teams = quali[:2]
+            for idx, q in enumerate(q_teams):
+                seed = str(7 + idx)
+                teams[seed] = {
+                    "seeding":   seed,
+                    "players":   q["players"] or [f"Q{idx+1}"],
+                    "teamId":    q.get("team_id"),
+                    "club":      q.get("club"),
+                    "dvvPoints": q.get("dvv_points"),
+                    "qualiPending": True,
+                }
+            for idx in range(len(q_teams), 2):
+                seed = str(7 + idx)
+                teams[seed] = {
+                    "seeding": seed,
+                    "players": [f"Q{idx+1}"],
+                    "qualiPending": True,
+                }
         numeric_seeds = sorted(int(s) for s in teams.keys() if s.isdigit())
 
     # Rules: 8-Team-Double-Elim Template, falls genau 8 numerische Seeds.
