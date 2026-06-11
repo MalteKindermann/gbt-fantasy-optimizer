@@ -58,7 +58,6 @@ let lockedPlayerIds = new Set(JSON.parse(localStorage.getItem('lockedPlayerIds')
 // Banned (must-exclude) players — algorithm may not pick them
 let bannedPlayerIds = new Set(JSON.parse(localStorage.getItem('bannedPlayerIds') || '[]'));
 // Whether to apply locks/bans during optimization (controlled by compare-tab toggle)
-let usePicks = false;
 
 // ── Data loading ──────────────────────────────────────────────────────────────
 
@@ -858,27 +857,15 @@ function switchToTab(tabId) {
     if (btn) switchTab(tabId, btn);
 }
 
-function onUsePicksChange(checked) {
-    usePicks = checked;
-    updatePicksHint();
-    if (comparisonResults) optimizeTeam();   // re-run instantly if results already exist
-}
-
 function updatePicksHint() {
     const hint = document.getElementById('usePicksHint');
     if (!hint) return;
     const locked = [...lockedPlayerIds].filter(id => availablePlayers.some(p => p.id === id && p.price > 0));
     const banned = [...bannedPlayerIds].filter(id => availablePlayers.some(p => p.id === id && p.price > 0));
-    if (!usePicks) {
-        hint.textContent = locked.length || banned.length
-            ? `(${locked.length} Picks & ${banned.length} Ausschlüsse werden ignoriert)`
-            : '';
-    } else {
-        const parts = [];
-        if (locked.length) parts.push(`🔒 ${locked.length} fest`);
-        if (banned.length) parts.push(`🚫 ${banned.length} ausgeschlossen`);
-        hint.textContent = parts.length ? parts.join(' · ') : '(keine Picks gesetzt)';
-    }
+    const parts = [];
+    if (locked.length) parts.push(`🔒 ${locked.length} fest`);
+    if (banned.length) parts.push(`🚫 ${banned.length} ausgeschlossen`);
+    hint.textContent = parts.length ? parts.join(' · ') : '';
 }
 
 // ── Bracket prediction view ───────────────────────────────────────────────────
@@ -2023,10 +2010,8 @@ function optimizeTeam() {
 function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen = 0, minWomen = 0) {
     computeAdjustedPT(availablePlayers);
 
-    // Locked / banned players only applied when the toggle is active
-    const locked = usePicks
-        ? availablePlayers.filter(p => lockedPlayerIds.has(p.id) && p.price > 0)
-        : [];
+    // Picks (locked) and bans always apply to every algorithm.
+    const locked = availablePlayers.filter(p => lockedPlayerIds.has(p.id) && p.price > 0);
     const lockedCost = locked.reduce((s, p) => s + p.price, 0);
     const remBudget  = budget - lockedCost;
     const remSize    = teamSize - locked.length;
@@ -2045,7 +2030,7 @@ function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen = 0, 
     // Pool excludes locked (pre-seeded) and banned (must-not-pick) players
     const pool = availablePlayers.filter(p =>
         !locked.includes(p) &&
-        !(usePicks && bannedPlayerIds.has(p.id))
+        !bannedPlayerIds.has(p.id)
     );
 
     // Run all algorithms — bracket-based ones only if sim is loaded.
@@ -2253,7 +2238,7 @@ function renderCompare() {
             : (r.totalExpCaptain       === bestExp       && r.totalExpCaptain       > 0 ? 'cmp-best' : '');
         const showExpRow      = isManualAlg ? showManualExp : showExp;
 
-        const activeBanned = usePicks ? bannedPlayerIds.size : 0;
+        const activeBanned = bannedPlayerIds.size;
         const lockedNote = (r.lockedCount > 0 || activeBanned > 0)
             ? `<div class="cmp-locked-note">${r.lockedCount > 0 ? `🔒 ${r.lockedCount} fest` : ''}${r.lockedCount > 0 && activeBanned > 0 ? ' · ' : ''}${activeBanned > 0 ? `🚫 ${activeBanned} ausgeschlossen` : ''}</div>`
             : '';

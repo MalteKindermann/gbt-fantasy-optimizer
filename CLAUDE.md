@@ -152,7 +152,7 @@ Single solver: `optimizeBranchBound` (DFS + fractional-knapsack upper-bound prun
 **Picks & Bans** (`lockedPlayerIds`, `bannedPlayerIds`, persisted in `localStorage`):
 - Locked players are pre-seeded into the team before `optimizeBranchBound` runs (budget/slots reduced accordingly).
 - Banned players are filtered out of the candidate pool.
-- Controlled by the "🔒 Meine Picks & Ausschlüsse verwenden" checkbox in the compare tab (`usePicks` flag). When unchecked, a pure-optimal run is shown instead.
+- Picks and bans always apply to every algorithm — no toggle. To run a pure-optimal pass, clear the picks/bans in the picks tab.
 
 ## Win probability — two functions, intentionally different
 
