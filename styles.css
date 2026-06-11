@@ -75,6 +75,10 @@ h1 {
     min-width: 200px;
 }
 
+/* The mobile-only primary action + settings toggle are hidden on desktop. */
+.control-group-primary,
+.control-group-toggle { display: none; }
+
 label {
     display: block;
     margin-bottom: 0.5rem;
@@ -838,6 +842,12 @@ input:focus, select:focus {
     border: 1px solid var(--border);
 }
 
+/* Desktop: the collapsible wrapper is just a contents-flow group; the toggle is hidden. */
+.player-filters-collapsible {
+    display: contents;
+}
+.player-filters-toggle { display: none; }
+
 .filter-group {
     display: flex;
     flex-direction: column;
@@ -1428,11 +1438,188 @@ input:focus, select:focus {
 }
 
 @media (max-width: 768px) {
-    h1 { font-size: 2.5rem; }
+    /* ── Header ─────────────────────────────────────────────────── */
+    h1 { font-size: 2rem; }
+    .subtitle { font-size: 0.95rem; }
+    .container { padding: 1rem 0.75rem; }
+
+    /* ── Controls bar: collapse behind a settings toggle ────────── */
+    .controls {
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+    }
+    .control-group { flex: 1 1 100%; min-width: 0; }
+
+    /* The mobile-only primary action + toggle become visible and sit side-by-side. */
+    .control-group-primary,
+    .control-group-toggle {
+        display: block;
+        flex: 1 1 calc(50% - 0.3rem);
+        min-width: 0;
+    }
+    .control-group-primary .btn,
+    .control-group-toggle .btn {
+        width: 100%;
+        padding: 0.85rem 0.5rem;
+        font-size: 0.95rem;
+    }
+
+    /* The desktop "Team Optimieren" button is redundant on mobile (we have the primary). */
+    .control-group-desktop-optimize { display: none; }
+
+    /* Hide every non-primary control until the user expands settings.
+       Both rules must share the same specificity so source order decides — and the
+       open rule must match the exact same selector minus the negation. */
+    .controls > .control-group:not(.control-group-primary):not(.control-group-toggle) {
+        display: none;
+    }
+    .controls.settings-open > .control-group:not(.control-group-primary):not(.control-group-toggle) {
+        display: block;
+        flex: 1 1 100%;
+    }
+    .controls.settings-open > .control-group .btn { width: 100%; }
+
+    /* Smaller labels + inputs inside the expanded settings panel. */
+    .controls label { font-size: 0.75rem; margin-bottom: 0.3rem; }
+    .controls input { padding: 0.6rem 0.75rem; font-size: 0.95rem; }
+
+    /* ── Tabs: horizontal scroll instead of wrap ────────────────── */
+    .tabs {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        gap: 0.5rem;
+        margin-bottom: 1.2rem;
+        padding-bottom: 0.25rem;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: thin;
+    }
+    .tabs::-webkit-scrollbar { height: 4px; }
+    .tab {
+        padding: 0.55rem 0.9rem;
+        font-size: 0.85rem;
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+
+    /* ── Player filter bar: collapse all but sort + toggle ──────── */
+    .player-filters {
+        gap: 0.75rem;
+        padding: 0.7rem 0.85rem;
+        align-items: stretch;
+    }
+    .player-filters-toggle {
+        display: inline-block;
+        background: var(--bg-dark);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 0.5rem 0.85rem;
+        border-radius: 8px;
+        font-family: 'Outfit', sans-serif;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+    .player-filters-collapsible {
+        display: none;
+        flex-direction: column;
+        gap: 0.75rem;
+        width: 100%;
+    }
+    .player-filters.filters-open .player-filters-collapsible {
+        display: flex;
+    }
+    .filter-group-sort { width: 100%; }
+    .filter-sort { width: 100%; }
+
+    /* ── Player cards: 2 columns on tablets/larger phones ───────── */
+    .player-grid { grid-template-columns: repeat(2, 1fr); gap: 0.6rem; }
+    .player-card { padding: 0.75rem 0.85rem; border-radius: 12px; }
+    /* Inside a narrower card, stats stack vertically for readability. */
+    .player-stats { grid-template-columns: 1fr 1fr; gap: 0.4rem 0.6rem; }
+
+    .player-header {
+        margin-bottom: 0.6rem;
+        gap: 0.6rem;
+        flex-wrap: nowrap;
+    }
+    .player-header > div:first-child {
+        min-width: 0;            /* allow flex child to shrink instead of overflowing */
+        flex: 1 1 auto;
+    }
+    .player-name {
+        font-size: 1.05rem;
+        margin-bottom: 0.3rem;
+        line-height: 1.25;
+        overflow-wrap: anywhere;
+    }
+    .player-position {
+        padding: 0.15rem 0.5rem;
+        font-size: 0.65rem;
+    }
+    .player-price {
+        font-size: 1.15rem;
+        gap: 0.3rem;
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+    .coin-icon { width: 18px; height: 18px; font-size: 0.75rem; }
+    .player-estimated-badge {
+        font-size: 0.65rem !important;
+        padding: 0.1rem 0.35rem !important;
+        margin-left: 0.3rem;
+    }
+
+    .player-stats {
+        gap: 0.45rem 0.75rem;
+        margin-top: 0.5rem;
+    }
+    .stat-label { font-size: 0.65rem; }
+    .stat-value { font-size: 0.95rem; margin-top: 0.1rem; }
+    .stat-value.highlight { font-size: 1.05rem; }
+
+    /* ── Compare tab: stack the algorithm columns ───────────────── */
+    .cmp-grid { grid-template-columns: 1fr; gap: 0.85rem; }
+    .cmp-col { padding: 0.85rem; }
+    .team-stats { flex-direction: column; gap: 0.75rem; }
+    .team-stats > * { font-size: 0.85rem; }
+
+    /* ── Bracket tab: keep desktop layout, just enable side-scroll ── */
+    /* Don't override .br-grid columns/rows — they encode the 8-row bracket
+       layout via grid-row spans. Overriding any of that causes matches to
+       overlap. We only bump breathing room — vertically inside a column,
+       and horizontally between columns — so nothing touches its neighbour. */
+    .br-grid { column-gap: 2rem; }
+    .br-col-body { min-height: 760px; }
+    .br-match { margin: 10px 0; }
+    .bracket-controls { gap: 0.5rem; }
+
+    /* ── Modals: full-screen on mobile ──────────────────────────── */
+    .amb-dialog {
+        width: 100vw;
+        max-width: none;
+        max-height: 100vh;
+        height: 100vh;
+        border-radius: 0;
+        padding: 1rem;
+        gap: 0.85rem;
+    }
+
+    /* ── Sync banner + general spacing ──────────────────────────── */
+    .compare-controls { padding: 0.5rem 0.75rem; gap: 0.5rem; }
+    .bracket-controls { padding: 0; }
+}
+
+@media (max-width: 480px) {
+    h1 { font-size: 1.6rem; }
+    .subtitle { display: none; }
+    .tab { padding: 0.5rem 0.7rem; font-size: 0.8rem; }
+}
+
+/* Very narrow phones: 2-col cards become cramped, fall back to one column. */
+@media (max-width: 420px) {
     .player-grid { grid-template-columns: 1fr; }
-    .team-stats { flex-direction: column; gap: 1rem; }
-    .controls { flex-direction: column; }
-    .control-group { min-width: 100%; }
 }
 
 /* ── Manual bracket mode ──────────────────────────────────────── */

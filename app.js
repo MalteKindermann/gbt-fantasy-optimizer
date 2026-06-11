@@ -1420,40 +1420,46 @@ const playerFilters = {
 function renderFilterBarHTML(prefix) {
     const pf = playerFilters;
     const ck = (g, v) => pf[g].has(v) ? 'checked' : '';
+    // The collapsible wrapper hides position/gender/status/price on mobile by default;
+    // the .player-filters-toggle button toggles a `.filters-open` class that reveals it.
     return `
     <div class="player-filters">
-        <div class="filter-group">
-            <span class="filter-label">Position</span>
-            <div class="filter-checks">
-                <label class="filter-check"><input type="checkbox" data-group="pos" data-val="Block"  ${ck('pos','Block')}> Block</label>
-                <label class="filter-check"><input type="checkbox" data-group="pos" data-val="Abwehr" ${ck('pos','Abwehr')}> Abwehr</label>
-                <label class="filter-check"><input type="checkbox" data-group="pos" data-val="Hybrid" ${ck('pos','Hybrid')}> Hybrid</label>
+        <button type="button" class="player-filters-toggle" onclick="togglePlayerFilters(this)"
+                aria-expanded="false">🔎 Filter ▾</button>
+        <div class="player-filters-collapsible">
+            <div class="filter-group">
+                <span class="filter-label">Position</span>
+                <div class="filter-checks">
+                    <label class="filter-check"><input type="checkbox" data-group="pos" data-val="Block"  ${ck('pos','Block')}> Block</label>
+                    <label class="filter-check"><input type="checkbox" data-group="pos" data-val="Abwehr" ${ck('pos','Abwehr')}> Abwehr</label>
+                    <label class="filter-check"><input type="checkbox" data-group="pos" data-val="Hybrid" ${ck('pos','Hybrid')}> Hybrid</label>
+                </div>
+            </div>
+            <div class="filter-group">
+                <span class="filter-label">Geschlecht</span>
+                <div class="filter-checks">
+                    <label class="filter-check"><input type="checkbox" data-group="gender" data-val="M" ${ck('gender','M')}> ♂ Männer</label>
+                    <label class="filter-check"><input type="checkbox" data-group="gender" data-val="W" ${ck('gender','W')}> ♀ Frauen</label>
+                </div>
+            </div>
+            <div class="filter-group">
+                <span class="filter-label">Status</span>
+                <div class="filter-checks">
+                    <label class="filter-check"><input type="checkbox" data-group="status" data-val="available" ${ck('status','available')}> Nur verfügbar</label>
+                </div>
+            </div>
+            <div class="filter-group">
+                <span class="filter-label">Preis (₡)</span>
+                <div class="filter-price">
+                    <input type="number" class="filter-price-input" data-price-edge="min" placeholder="min" min="0"
+                           value="${pf.priceMin ?? ''}">
+                    <span class="filter-price-sep">–</span>
+                    <input type="number" class="filter-price-input" data-price-edge="max" placeholder="max" min="0"
+                           value="${pf.priceMax ?? ''}">
+                </div>
             </div>
         </div>
-        <div class="filter-group">
-            <span class="filter-label">Geschlecht</span>
-            <div class="filter-checks">
-                <label class="filter-check"><input type="checkbox" data-group="gender" data-val="M" ${ck('gender','M')}> ♂ Männer</label>
-                <label class="filter-check"><input type="checkbox" data-group="gender" data-val="W" ${ck('gender','W')}> ♀ Frauen</label>
-            </div>
-        </div>
-        <div class="filter-group">
-            <span class="filter-label">Status</span>
-            <div class="filter-checks">
-                <label class="filter-check"><input type="checkbox" data-group="status" data-val="available" ${ck('status','available')}> Nur verfügbar</label>
-            </div>
-        </div>
-        <div class="filter-group">
-            <span class="filter-label">Preis (₡)</span>
-            <div class="filter-price">
-                <input type="number" class="filter-price-input" data-price-edge="min" placeholder="min" min="0"
-                       value="${pf.priceMin ?? ''}">
-                <span class="filter-price-sep">–</span>
-                <input type="number" class="filter-price-input" data-price-edge="max" placeholder="max" min="0"
-                       value="${pf.priceMax ?? ''}">
-            </div>
-        </div>
-        <div class="filter-group">
+        <div class="filter-group filter-group-sort">
             <span class="filter-label">Sortieren nach</span>
             <select class="filter-sort" data-sort-select>
                 <option value="tp"               ${pf.sortBy==='tp'?'selected':''}>Saison-Punkte ↓</option>
@@ -1465,6 +1471,27 @@ function renderFilterBarHTML(prefix) {
             </select>
         </div>
     </div>`;
+}
+
+// Mobile: toggle the controls (settings) bar.
+function toggleSettings() {
+    const controls = document.querySelector('.controls');
+    if (!controls) return;
+    const open = controls.classList.toggle('settings-open');
+    const btn  = document.getElementById('settingsToggleBtn');
+    if (btn) {
+        btn.setAttribute('aria-expanded', String(open));
+        btn.textContent = open ? '⚙ Einstellungen ▴' : '⚙ Einstellungen ▾';
+    }
+}
+
+// Mobile: toggle the collapsible block of the player filters bar.
+function togglePlayerFilters(btn) {
+    const bar = btn.closest('.player-filters');
+    if (!bar) return;
+    const open = bar.classList.toggle('filters-open');
+    btn.setAttribute('aria-expanded', String(open));
+    btn.textContent = open ? '🔎 Filter ▴' : '🔎 Filter ▾';
 }
 
 // Re-renders whichever tab the user is currently on (both bars share state).
@@ -1834,7 +1861,8 @@ function computeAdjustedPT(candidates, k = 3) {
 // Team score = Σ v(p) + 0.5 × max(v(p))  [captain scores 1.5× their value]
 // captainVal tracks the current max player value in the team; the bonus on top is 0.5 × captainVal.
 // Upper bound = current_total + fractional_remaining_sum + max_possible_extra_captain.
-function optimizeBranchBound(candidates, budget, teamSize, maxBlock, maxAbwehr, alg) {
+function optimizeBranchBound(candidates, budget, teamSize, maxBlock, maxAbwehr, alg,
+                              minMen = 0, minWomen = 0, exactGender = false) {
     const sorted = [...candidates]
         .filter(p => getObjectiveValue(p, alg) > 0)
         .sort((a, b) =>
@@ -1849,6 +1877,9 @@ function optimizeBranchBound(candidates, budget, teamSize, maxBlock, maxAbwehr, 
     const globalMaxVal = n > 0
         ? Math.max(...sorted.map(p => getObjectiveValue(p, alg)))
         : 0;
+
+    // Gender constraint active at all?
+    const genderActive = minMen > 0 || minWomen > 0;
 
     // Fractional knapsack upper bound on remaining player sum
     function sumUpperBound(fromIdx, remBudget, remSlots) {
@@ -1869,13 +1900,21 @@ function optimizeBranchBound(candidates, budget, teamSize, maxBlock, maxAbwehr, 
     }
 
     // captainVal = max objective value in current team; bonus on top of sumVal = 0.5 × captainVal
-    function dfs(idx, team, cost, sumVal, captainVal, bc, ac) {
+    function dfs(idx, team, cost, sumVal, captainVal, bc, ac, mc, wc) {
         const slotsLeft = teamSize - team.length;
         const totalVal  = sumVal + 0.5 * captainVal;
 
         if (slotsLeft === 0 || idx >= n || n - idx < slotsLeft) {
+            // At a leaf, only accept solution if gender minimums are met
+            if (slotsLeft === 0 && genderActive && (mc < minMen || wc < minWomen)) return;
             if (totalVal > bestValue) { bestValue = totalVal; bestTeam = [...team]; }
             return;
+        }
+
+        // Gender-feasibility pruning: can we still reach the minimums with remaining slots?
+        if (genderActive) {
+            const need = Math.max(0, minMen - mc) + Math.max(0, minWomen - wc);
+            if (need > slotsLeft) return;
         }
 
         // Extra captain bonus we could gain from remaining players (1.5× → +0.5× of delta)
@@ -1889,6 +1928,14 @@ function optimizeBranchBound(candidates, budget, teamSize, maxBlock, maxAbwehr, 
             if (cost + p.price > budget) continue;
             if (p.pos === 'Block'  && maxBlock  > 0 && bc >= maxBlock)  continue;
             if (p.pos === 'Abwehr' && maxAbwehr > 0 && ac >= maxAbwehr) continue;
+            // Exact-gender cap: if the user fully partitions the team by gender,
+            // the residual minMen/minWomen are also the hard maximum for this DFS run.
+            // (No `> 0` guard — when remMinMen is 0 because locked already covers the
+            // quota, every additional man must still be skipped.)
+            if (exactGender) {
+                if (p.gender === 'M' && mc >= minMen)   continue;
+                if (p.gender === 'W' && wc >= minWomen) continue;
+            }
 
             const newCaptainVal = Math.max(captainVal, v);
             const newSumVal     = sumVal + v;
@@ -1900,42 +1947,59 @@ function optimizeBranchBound(candidates, budget, teamSize, maxBlock, maxAbwehr, 
             team.push(p);
             dfs(i + 1, team, cost + p.price, newSumVal, newCaptainVal,
                 bc + (p.pos === 'Block'  ? 1 : 0),
-                ac + (p.pos === 'Abwehr' ? 1 : 0));
+                ac + (p.pos === 'Abwehr' ? 1 : 0),
+                mc + (p.gender === 'M' ? 1 : 0),
+                wc + (p.gender === 'W' ? 1 : 0));
             team.pop();
         }
     }
 
-    dfs(0, [], 0, 0, 0, 0, 0);
+    dfs(0, [], 0, 0, 0, 0, 0, 0, 0);
     return bestTeam;
 }
 
 // ── Main optimize entry point ─────────────────────────────────────────────────
 
 function optimizeTeam() {
-    // Find the button defensively — `.btn` matches several buttons in the
-    // controls bar (Optimieren / Prognose neu / H2H Vergleich). Locate the
-    // optimize button by its onclick to be sure we restore the right one.
-    const btn = document.querySelector('button[onclick="optimizeTeam()"]')
-              || document.querySelector('.btn');
+    // There can be two Optimize buttons (mobile-primary + desktop) — toggle both
+    // so the spinner state stays consistent regardless of which one was clicked.
+    const btns = Array.from(document.querySelectorAll('button[onclick="optimizeTeam()"]'));
+    const btnLabels = btns.map(b => b.textContent);
+    const setBtnState = (disabled, text) => {
+        btns.forEach((b, i) => {
+            b.disabled = disabled;
+            b.textContent = text !== null ? text : btnLabels[i];
+        });
+    };
 
     try {
         const budget    = parseInt(document.getElementById('budget').value);
         const teamSize  = parseInt(document.getElementById('teamSize').value);
         const maxBlock  = parseInt(document.getElementById('maxBlock').value);
         const maxAbwehr = parseInt(document.getElementById('maxAbwehr').value);
+        const minMen    = parseInt(document.getElementById('minMen').value)   || 0;
+        const minWomen  = parseInt(document.getElementById('minWomen').value) || 0;
+
+        if (minMen + minWomen > teamSize) {
+            alert('Anzahl Männer + Frauen (' + (minMen + minWomen) + ') überschreitet die Teamgröße ('
+                  + teamSize + ').\n\nBitte Werte anpassen — Summe muss ≤ Teamgröße sein. '
+                  + 'Wenn die Summe genau der Teamgröße entspricht, wird die Aufteilung exakt erzwungen; '
+                  + 'wenn kleiner, gilt sie als Mindestanzahl.');
+            return;
+        }
 
         if (!availablePlayers || availablePlayers.length === 0) {
             alert('Keine verfügbaren Spieler geladen.\n\nFalls die Seite gerade lädt, einen Moment warten und nochmal klicken.');
             return;
         }
 
-        if (btn) { btn.textContent = '⏳ Berechne…'; btn.disabled = true; }
+        setBtnState(true, '⏳ Berechne…');
 
         // Defer heavy work so the spinner paints, but wrap in try/finally so
         // any throw can't leave the button disabled and the page silently dead.
         setTimeout(() => {
             try {
-                runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr);
+                runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen, minWomen);
                 renderCompare();
                 switchToTab('compare');
             } catch (err) {
@@ -1944,7 +2008,7 @@ function optimizeTeam() {
                       + (err?.message || String(err))
                       + '\n\nDetails in der Browser-Konsole (F12).');
             } finally {
-                if (btn) { btn.textContent = '🚀 Team Optimieren'; btn.disabled = false; }
+                setBtnState(false, null);
             }
         }, 20);
     } catch (err) {
@@ -1952,11 +2016,11 @@ function optimizeTeam() {
         // input element, etc.) — restore the button so the page isn't frozen.
         console.error('optimizeTeam (sync) failed:', err);
         alert('optimizeTeam: ' + (err?.message || String(err)));
-        if (btn) { btn.textContent = '🚀 Team Optimieren'; btn.disabled = false; }
+        setBtnState(false, null);
     }
 }
 
-function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr) {
+function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen = 0, minWomen = 0) {
     computeAdjustedPT(availablePlayers);
 
     // Locked / banned players only applied when the toggle is active
@@ -1968,8 +2032,16 @@ function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr) {
     const remSize    = teamSize - locked.length;
     const lockedBlock  = locked.filter(p => p.pos === 'Block').length;
     const lockedAbwehr = locked.filter(p => p.pos === 'Abwehr').length;
+    const lockedMen    = locked.filter(p => p.gender === 'M').length;
+    const lockedWomen  = locked.filter(p => p.gender === 'W').length;
     const remMaxBlock  = maxBlock  > 0 ? Math.max(0, maxBlock  - lockedBlock)  : maxBlock;
     const remMaxAbwehr = maxAbwehr > 0 ? Math.max(0, maxAbwehr - lockedAbwehr) : maxAbwehr;
+    const remMinMen    = minMen   > 0 ? Math.max(0, minMen   - lockedMen)   : 0;
+    const remMinWomen  = minWomen > 0 ? Math.max(0, minWomen - lockedWomen) : 0;
+    // Exact-gender mode: the user fully partitioned the full team between M and W.
+    // Note: derived from the ORIGINAL teamSize/minMen/minWomen so locked players
+    // already counted toward the minimums don't accidentally flip mode.
+    const exactGender  = (minMen + minWomen === teamSize) && (minMen > 0 || minWomen > 0);
     // Pool excludes locked (pre-seeded) and banned (must-not-pick) players
     const pool = availablePlayers.filter(p =>
         !locked.includes(p) &&
@@ -2011,7 +2083,8 @@ function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr) {
             // Locked players already fill/exceed the team — use them directly
             team = locked;
         } else {
-            const optimized = optimizeBranchBound(pool, remBudget, remSize, remMaxBlock, remMaxAbwehr, a);
+            const optimized = optimizeBranchBound(pool, remBudget, remSize, remMaxBlock, remMaxAbwehr, a,
+                                                  remMinMen, remMinWomen, exactGender);
             team = [...locked, ...optimized];
         }
         const summary = buildTeamSummary(team, a);

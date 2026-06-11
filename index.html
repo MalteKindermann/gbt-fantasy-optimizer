@@ -40,6 +40,19 @@
         </header>
 
         <div class="controls">
+            <!-- Mobile-only: primary action + settings toggle. Hidden on desktop via CSS. -->
+            <div class="control-group control-group-primary">
+                <button class="btn" onclick="optimizeTeam()">🚀 Optimieren</button>
+            </div>
+            <div class="control-group control-group-toggle">
+                <button class="btn" style="background:var(--bg-card);color:var(--text);border:1px solid var(--border)"
+                        onclick="toggleSettings()" id="settingsToggleBtn"
+                        aria-expanded="false" aria-controls="settingsSection">
+                    ⚙ Einstellungen ▾
+                </button>
+            </div>
+
+            <!-- The rest of the controls. On mobile this whole block collapses behind the toggle. -->
             <div class="control-group">
                 <label>Budget (Coins)</label>
                 <input type="number" id="budget" value="240" min="0">
@@ -57,6 +70,14 @@
                 <input type="number" id="maxAbwehr" value="0" min="0">
             </div>
             <div class="control-group">
+                <label>Anzahl Männer (0 = egal)</label>
+                <input type="number" id="minMen" value="0" min="0">
+            </div>
+            <div class="control-group">
+                <label>Anzahl Frauen (0 = egal)</label>
+                <input type="number" id="minWomen" value="0" min="0">
+            </div>
+            <div class="control-group control-group-desktop-optimize">
                 <button class="btn" onclick="optimizeTeam()">🚀 Team Optimieren</button>
             </div>
             <div class="control-group">
