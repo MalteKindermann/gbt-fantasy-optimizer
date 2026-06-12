@@ -154,12 +154,16 @@ async function loadAllSeasonOverlays() {
 //     we cached more than one year.
 async function loadPlayerData() {
     const cacheBust = '?t=' + Date.now();
-    const [allRes, availRes, overlays] = await Promise.all([
+    const [allRes, availRes, overlays, histRes] = await Promise.all([
         // players_all.json is OPTIONAL now — 404 is fine.
         apiFetch('data/players_all.json' + cacheBust),
         apiFetch('data/players_available.json' + cacheBust),
-        loadAllSeasonOverlays()
+        loadAllSeasonOverlays(),
+        // player_history.json is also optional — only present when firestore_sync
+        // succeeded with valid auth. Frontend gracefully degrades without it.
+        apiFetch('data/player_history.json' + cacheBust),
     ]);
+    window.playerHistory = histRes.ok ? await histRes.json() : {};
     if (!availRes.ok) throw new Error('HTTP error loading players_available.json');
     const rawAll   = allRes.ok ? await allRes.json() : [];
     const rawAvail = await availRes.json();
@@ -246,6 +250,11 @@ async function loadPlayerData() {
     allPlayers = fullRawAll.map(p => buildPlayer(p, priceMap.get(p.id) ?? null));
     availablePlayers = allPlayers.filter(p => p.price !== null && p.price > 0);
     computePoolEstimates(availablePlayers);
+    // History-derived metrics — constant per player, so compute once at load.
+    // Re-run in runOptimizePipeline isn't needed but harmless if added later.
+    computeVarianceScore(allPlayers);
+    computeFormScore(allPlayers);
+    computeSideOutMetrics(allPlayers);
 
     // Stash for sync-warning rendering
     window.__playerDataMeta = {
@@ -1147,14 +1156,22 @@ function closeMatchDetail() {
 
 // ── Manual bracket override helpers ───────────────────────────────────────────
 
+function _manualKeyFor(gender) {
+    const block = tournamentSim?.byGender?.[gender];
+    return `manualOverrides_${gender}_${block?.tournamentId ?? 'x'}`;
+}
+
 function _manualKey() {
-    const block = tournamentSim?.byGender?.[bracketGender];
-    return `manualOverrides_${bracketGender}_${block?.tournamentId ?? 'x'}`;
+    return _manualKeyFor(bracketGender);
+}
+
+function getManualOverridesFor(gender) {
+    try { return JSON.parse(localStorage.getItem(_manualKeyFor(gender)) || '{}'); }
+    catch { return {}; }
 }
 
 function getManualOverrides() {
-    try { return JSON.parse(localStorage.getItem(_manualKey()) || '{}'); }
-    catch { return {}; }
+    return getManualOverridesFor(bracketGender);
 }
 
 function saveManualOverrides(ov) {
@@ -1405,7 +1422,10 @@ function playerCard(p, index, showPrice) {
         : '';
 
     return `
-    <div class="player-card" style="animation: slideUp 0.4s ease-out ${Math.min(index, 30) * 0.03}s both">
+    <div class="player-card player-card-clickable"
+         onclick="openPlayerDetail('${p.id}')"
+         style="animation: slideUp 0.4s ease-out ${Math.min(index, 30) * 0.03}s both;cursor:pointer"
+         title="Klicken: Detail-Ansicht (Stats + Turnier-Historie)">
         <div class="player-header">
             <div>
                 <div class="player-name">${p.name}</div>
@@ -1815,7 +1835,12 @@ function picksCard(p, index, state) {
 // ── Optimization algorithms ───────────────────────────────────────────────────
 
 function getObjectiveValue(player, alg) {
-    if (alg === 'consistent')        return player.adjustedPT           ?? player.avgPerTournament;
+    if (alg === 'consistent') {
+        // Prefer real variance-based score from per-tournament history; fall back
+        // to Bayesian shrinkage if not enough history (<3 tournaments).
+        return player.varianceScore ?? player.adjustedPT ?? player.avgPerTournament;
+    }
+    if (alg === 'form-trend')        return player.formScore             ?? player.avgPerTournament;
     if (alg === 'tournament')        return player.expectedPoints        ?? player.avgPerTournament;
     if (alg === 'tournament-manual') return player.manualExpectedPoints  ?? player.avgPerTournament;
     if (alg === 'final-focus')       return player.finalRoundObjective   ?? player.avgPerTournament;
@@ -1833,8 +1858,10 @@ function computeFinalRoundValues() {
         const block = tournamentSim.byGender?.[gender];
         if (!block?.bracketPrediction || !block?.teams) continue;
 
-        // Apply manual overrides only for the currently displayed bracket gender
-        const overrides = (gender === bracketGender) ? getManualOverrides() : {};
+        // Read manual overrides for THIS gender directly (used to be gated on the
+        // currently-displayed bracketGender, which made badges stale for the
+        // other gender — fixed by parameterizing the localStorage lookup).
+        const overrides = getManualOverridesFor(gender);
         const derived = deriveManualBracket(block.bracketPrediction, overrides);
 
         const matchNums = Object.keys(derived).map(Number).sort((a, b) => a - b);
@@ -1885,6 +1912,69 @@ function computeAdjustedPT(candidates, k = 3) {
         p.adjustedPT = p.t > 0
             ? (p.t * p.avgPerTournament + k * priorMean) / (p.t + k)
             : 0;
+    });
+}
+
+// Variance-penalized score: mean − λ × stdDev of per-tournament fantasyPoints.
+// Needs ≥3 tournaments in playerHistory to be meaningful; falls back to adjustedPT
+// (Bayesian shrinkage) otherwise so the Konsistent algorithm degrades gracefully.
+function computeVarianceScore(candidates, lambda = 0.5) {
+    const hist = window.playerHistory || {};
+    candidates.forEach(p => {
+        const entries = hist[p.id];
+        if (!entries || entries.length < 3) {
+            p.varianceScore = null;   // signal: fall back
+            return;
+        }
+        const fps = entries.map(e => e.fantasyPoints).filter(v => typeof v === 'number');
+        if (fps.length < 3) { p.varianceScore = null; return; }
+        const mean = fps.reduce((s, v) => s + v, 0) / fps.length;
+        const variance = fps.reduce((s, v) => s + (v - mean) ** 2, 0) / fps.length;
+        p.varianceScore = mean - lambda * Math.sqrt(variance);
+    });
+}
+
+// Form-trend score: weighted average of the last 3 tournament fantasy points,
+// weights [0.5, 0.3, 0.2] (newest first). Null if fewer than 3 entries.
+function computeFormScore(candidates) {
+    const hist = window.playerHistory || {};
+    const WEIGHTS = [0.5, 0.3, 0.2];
+    candidates.forEach(p => {
+        const entries = hist[p.id];
+        if (!entries || entries.length < 3) { p.formScore = null; return; }
+        // Entries are chronological (oldest first) — take last 3 reversed (newest first).
+        const recent = entries.slice(-3).reverse();
+        let score = 0;
+        for (let i = 0; i < WEIGHTS.length; i++) {
+            score += WEIGHTS[i] * (recent[i].fantasyPoints ?? 0);
+        }
+        p.formScore = score;
+    });
+}
+
+// Side-out indicators aggregated across all tournaments in player_history.
+// receptionRate = good / (good + bad + error)
+// attackEfficiency = (kills − error − blocked) / (kills + error + blocked + bad)
+// Stored on the player object for display in modals / H2H; NOT used as algorithm objective.
+function computeSideOutMetrics(candidates) {
+    const hist = window.playerHistory || {};
+    candidates.forEach(p => {
+        const entries = hist[p.id] || [];
+        let rG = 0, rB = 0, rE = 0;
+        let aK = 0, aErr = 0, aBlk = 0, aBad = 0;
+        for (const e of entries) {
+            rG += e.receptionGood  ?? 0;
+            rB += e.receptionBad   ?? 0;
+            rE += e.receptionError ?? 0;
+            aK   += e.attackKills   ?? 0;
+            aErr += e.attackError   ?? 0;
+            aBlk += e.attackBlocked ?? 0;
+            aBad += e.attackBad     ?? 0;
+        }
+        const recTot = rG + rB + rE;
+        const atkTot = aK + aErr + aBlk + aBad;
+        p.receptionRate    = recTot > 0 ? rG / recTot : null;
+        p.attackEfficiency = atkTot > 0 ? (aK - aErr - aBlk) / atkTot : null;
     });
 }
 
@@ -2053,6 +2143,10 @@ function optimizeTeam() {
 
 function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen = 0, minWomen = 0) {
     computeAdjustedPT(availablePlayers);
+    // History-based metrics — no-op when player_history.json is missing.
+    computeVarianceScore(availablePlayers);
+    computeFormScore(availablePlayers);
+    computeSideOutMetrics(availablePlayers);
 
     // Picks (locked) and bans always apply to every algorithm.
     const locked = availablePlayers.filter(p => lockedPlayerIds.has(p.id) && p.price > 0);
@@ -2077,8 +2171,11 @@ function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen = 0, 
         !bannedPlayerIds.has(p.id)
     );
 
-    // Run all algorithms — bracket-based ones only if sim is loaded.
+    // Run all algorithms — bracket-based ones only if sim is loaded,
+    // history-based form-trend only if at least one player has ≥3 tournaments.
     const algsToRun = ['optimal', 'consistent'];
+    const hasFormData = availablePlayers.some(p => p.formScore != null);
+    if (hasFormData) algsToRun.push('form-trend');
     if (tournamentSim !== null) algsToRun.push('tournament');
 
     const manualMap = computeManualExpectedMatches();
@@ -2173,7 +2270,8 @@ function buildTeamSummary(team, alg) {
 
 const ALG_LABELS = {
     optimal:             { name: 'Optimal',            icon: '⭐', desc: 'max Σ Ø/Turnier'              },
-    consistent:          { name: 'Konsistent',         icon: '🛡',  desc: 'Bayes-gedämpft'               },
+    consistent:          { name: 'Konsistent',         icon: '🛡',  desc: 'Ø − λ·Streuung'               },
+    'form-trend':        { name: 'Form-Trend',         icon: '📈', desc: 'Letzte 3 Turniere stärker'    },
     tournament:          { name: 'Turnier-Prognose',   icon: '🎯', desc: 'Sim × Match-Schnitt'         },
     'tournament-manual': { name: 'Turnier-Manuell',    icon: '✏', desc: 'Manueller Baum × Schnitt'    },
     'final-focus':       { name: 'Finale-Fokus',       icon: '🏆', desc: 'max HF/Finale-Spieler'       },
@@ -2363,6 +2461,108 @@ const OBJECTIVE_META = {
     'final-focus':       { label: 'Final-Round Score',          short: 'F-Score', digits: 0 },
 };
 
+// Full tournament-history table for the why-modal / H2H view.
+// Shows ALL entries newest-first, with a year-divider row between years.
+// Pass `wrap=false` to omit the outer .md-section block (for H2H side-by-side).
+function renderHistoryTable(playerId, wrap = true) {
+    const hist = (window.playerHistory || {})[playerId];
+    if (!hist || hist.length === 0) return '';
+    const ordered = hist.slice().reverse();   // newest first
+    let lastYear = null;
+    const rows = ordered.map(e => {
+        const year = (e.dateEnd || '').slice(0, 4) || '?';
+        const fp = e.fantasyPoints != null ? Number(e.fantasyPoints).toFixed(1) : '–';
+        let header = '';
+        if (year !== lastYear) {
+            header = `<tr class="why-history-year"><td colspan="4">${escapeHtml(year)}</td></tr>`;
+            lastYear = year;
+        }
+        return `${header}<tr>
+            <td>${escapeHtml(e.tournamentName || '?')}</td>
+            <td class="why-row-val">${e.dateEnd || ''}</td>
+            <td class="why-row-val"><strong>${fp}</strong></td>
+            <td class="why-row-val">${e.matches ?? '–'}</td>
+        </tr>`;
+    }).join('');
+    const table = `
+        <table class="why-stats why-history">
+            <thead>
+                <tr><th>Turnier</th><th>Datum</th><th>FP</th><th>Matches</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>`;
+    if (!wrap) return table;
+    return `
+        <div class="md-section">
+            <div class="md-section-title">📅 Turnier-Historie (${hist.length})</div>
+            ${table}
+        </div>`;
+}
+
+// Algorithm-agnostic player detail modal. Used from the "Alle Spieler" tab where
+// no algorithm/team context exists. Shows the same stats + history as the
+// why-modal but without the "why was this player chosen" framing.
+function openPlayerDetail(playerId) {
+    const player = (availablePlayers.find(p => p.id === playerId)
+                   || allPlayers.find(p => p.id === playerId));
+    if (!player) return;
+
+    const fmt = (v, d = 1) => (v == null || isNaN(v)) ? '–' : Number(v).toFixed(d);
+    const statRow = (label, val) => `
+        <tr><td class="why-row-label">${label}</td><td class="why-row-val">${val}</td></tr>`;
+    const isAvail = player.price > 0;
+    const statsHtml = `
+        <table class="why-stats">
+            <tbody>
+                ${statRow('Position', `<span class="cmp-pos cmp-pos-${player.pos.toLowerCase()}">${player.pos}</span>`)}
+                ${statRow('Geschlecht', player.gender === 'M' ? '♂' : '♀')}
+                ${statRow('Preis', isAvail ? `${player.price} ₡` : '<span style="color:var(--text-dim)">nicht verfügbar</span>')}
+                ${statRow('Saison-Punkte', fmt(player.tp, 0))}
+                ${statRow('Turniere / Matches', `${player.t} / ${player.mp}`)}
+                ${statRow('Ø Punkte/Turnier', fmt(player.avgPerTournament, 1))}
+                ${statRow('Ø Punkte/Match',   fmt(player.avgPerMatch, 2))}
+                ${player.expectedMatches != null ? statRow('Erw. Matches (Sim)', fmt(player.expectedMatches, 2)) : ''}
+                ${player.expectedPoints  != null ? statRow('Erw. Punkte (Sim)',  fmt(player.expectedPoints, 0)) : ''}
+                ${player.varianceScore   != null ? statRow('Konsistenz-Score',  `${fmt(player.varianceScore, 1)} <span class="why-row-hint">(Ø − ½·Streuung)</span>`) : ''}
+                ${player.formScore       != null ? statRow('Form (letzte 3)',   `${fmt(player.formScore, 1)} <span class="why-row-hint">(0,5·neu + 0,3·… + 0,2·…)</span>`) : ''}
+                ${player.receptionRate   != null ? statRow('Annahme-Quote',     `${(player.receptionRate * 100).toFixed(0)} % <span class="why-row-hint">(good ÷ alle Annahmen)</span>`) : ''}
+                ${player.attackEfficiency != null ? statRow('Angriffs-Effizienz', `${(player.attackEfficiency * 100).toFixed(0)} % <span class="why-row-hint">(Kills − Fehler − geblockt) ÷ Angriffe</span>`) : ''}
+            </tbody>
+        </table>`;
+    const historyHtml = renderHistoryTable(player.id);
+
+    closePlayerDetail();
+    const modal = document.createElement('div');
+    modal.id = 'playerDetailModal';
+    modal.className = 'amb-modal';
+    modal.onclick = (e) => { if (e.target === modal) closePlayerDetail(); };
+    modal.innerHTML = `
+        <div class="amb-dialog" style="max-width:720px">
+            <div class="amb-header">
+                <div>
+                    <h2 style="margin:0">${escapeHtml(player.name)}</h2>
+                    <p style="margin:0.3rem 0 0;font-size:0.85rem;color:var(--text-dim)">
+                        Spieler-Details · Statistiken &amp; Turnier-Historie
+                    </p>
+                </div>
+                <button class="amb-close" onclick="closePlayerDetail()" title="Schließen">×</button>
+            </div>
+            <div class="amb-body">
+                <div class="md-section">
+                    <div class="md-section-title">Eckdaten</div>
+                    ${statsHtml}
+                </div>
+                ${historyHtml || ''}
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+}
+
+function closePlayerDetail() {
+    const m = document.getElementById('playerDetailModal');
+    if (m) m.remove();
+}
+
 function openWhyChosen(playerId, alg) {
     const player = availablePlayers.find(p => p.id === playerId);
     const result = comparisonResults?.[alg];
@@ -2407,8 +2607,13 @@ function openWhyChosen(playerId, alg) {
                 ${player.expectedMatches != null ? statRow('Erw. Matches (Sim)', fmt(player.expectedMatches, 2)) : ''}
                 ${player.expectedPoints  != null ? statRow('Erw. Punkte (Sim)',  fmt(player.expectedPoints, 0)) : ''}
                 ${statRow('Pts / Coin (Effizienz)', fmt(objVal / player.price, 2))}
+                ${player.receptionRate    != null ? statRow('Annahme-Quote', `${(player.receptionRate * 100).toFixed(0)} % <span class="why-row-hint">(good ÷ alle Annahmen)</span>`) : ''}
+                ${player.attackEfficiency != null ? statRow('Angriffs-Effizienz', `${(player.attackEfficiency * 100).toFixed(0)} % <span class="why-row-hint">(Kills − Fehler − geblockt) ÷ alle Angriffe</span>`) : ''}
+                ${player.varianceScore    != null ? statRow('Konsistenz-Score', `${fmt(player.varianceScore, 1)} <span class="why-row-hint">(Ø − ½·Streuung der letzten Turniere)</span>`) : ''}
+                ${player.formScore        != null ? statRow('Form (letzte 3)', `${fmt(player.formScore, 1)} <span class="why-row-hint">(0,5·neu + 0,3·… + 0,2·…)</span>`) : ''}
             </tbody>
         </table>`;
+    const historyHtml = renderHistoryTable(player.id);
 
     const reasonBadges = [];
     if (isCap)    reasonBadges.push('<span class="cmp-captain-badge">C</span> Captain (1,5×)');
@@ -2468,6 +2673,7 @@ function openWhyChosen(playerId, alg) {
                     <div class="md-section-title">Spieler-Eckdaten</div>
                     ${statsHtml}
                 </div>
+                ${historyHtml}
                 <div class="md-section">
                     <div class="md-section-title">Begründung</div>
                     <div class="why-explanation">${explanation}</div>
@@ -2689,7 +2895,30 @@ function renderH2HResults() {
         return `<p style="color:var(--warning);text-align:center;margin:1.5rem 0">
             Bitte zwei verschiedene Spieler wählen.</p>`;
     }
-    return renderH2HStatsCompare(a, b) + renderH2HIndividualSection(a, b);
+    return renderH2HStatsCompare(a, b)
+         + renderH2HHistoryCompare(a, b)
+         + renderH2HIndividualSection(a, b);
+}
+
+// Side-by-side per-tournament fantasyPoints history. Two compact tables —
+// one per player. Returns empty string if neither player has history.
+function renderH2HHistoryCompare(a, b) {
+    const tableA = renderHistoryTable(a.id, false);
+    const tableB = renderHistoryTable(b.id, false);
+    if (!tableA && !tableB) return '';
+    const cell = (name, table) => `
+        <div>
+            <div class="h2h-history-name">${escapeHtml(name)}</div>
+            ${table || '<p class="h2h-no-history">Keine Turnier-Historie verfügbar.</p>'}
+        </div>`;
+    return `
+        <div class="md-section">
+            <div class="md-section-title">📅 Turnier-Historie</div>
+            <div class="h2h-history-grid">
+                ${cell(a.name, tableA)}
+                ${cell(b.name, tableB)}
+            </div>
+        </div>`;
 }
 
 // Public helper used by other modals to jump straight into the comparator
@@ -2728,6 +2957,14 @@ function renderH2HStatsCompare(a, b) {
         { label: 'Pts/Coin',          va: fmt(a.avgPerCoin, 2),  vb: fmt(b.avgPerCoin, 2),  cmp: better(a.avgPerCoin, b.avgPerCoin) },
         { label: 'Erw. Matches (Sim)', va: fmt(eMatA, 2),        vb: fmt(eMatB, 2),         cmp: better(eMatA, eMatB) },
         { label: 'Erw. Punkte (Sim)', va: fmt(ePtsA, 0),         vb: fmt(ePtsB, 0),         cmp: better(ePtsA, ePtsB) },
+        { label: 'Annahme-Quote',     va: avA?.receptionRate    != null ? `${(avA.receptionRate*100).toFixed(0)} %` : '–',
+                                       vb: avB?.receptionRate    != null ? `${(avB.receptionRate*100).toFixed(0)} %` : '–',
+                                       cmp: better(avA?.receptionRate, avB?.receptionRate) },
+        { label: 'Angriffs-Effizienz', va: avA?.attackEfficiency != null ? `${(avA.attackEfficiency*100).toFixed(0)} %` : '–',
+                                       vb: avB?.attackEfficiency != null ? `${(avB.attackEfficiency*100).toFixed(0)} %` : '–',
+                                       cmp: better(avA?.attackEfficiency, avB?.attackEfficiency) },
+        { label: 'Form (letzte 3)',    va: fmt(avA?.formScore, 1), vb: fmt(avB?.formScore, 1),
+                                       cmp: better(avA?.formScore, avB?.formScore) },
     ];
 
     const rowsHtml = rows.map(r => `

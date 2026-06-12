@@ -121,7 +121,8 @@ Gitignored (auto-generated under `$DATA_DIR`):
 | `data/players_season.json` | Legacy alias for the current year's overlay — `firestore_sync` keeps it in sync for backward-compat. |
 | `data/players_available.json` | List of `{name, price}` rebuilt from the current bracket on every sim run. Created as empty `[]` stub by `serve.py` on first start. |
 | `data/tournament_sim.json` | Sim output. Keyed by `byGender.m` and `byGender.f`; `playerExpectedMatches` at top level is the merged across genders. |
-| `data/.cache/` | Disk caches: DVV scrapes (1 h), gbt.hanski.de bracket fallback (1 h), H2H per-pair (24 h), Firestore snapshot (10 min). Wipe or pass `--force-refresh` to bypass. |
+| `data/player_history.json` | Per-player per-tournament `fantasyPoints` + skill stats from `tournaments/<id>/stats/<playerId>`. Schema: `{ "<playerId>": [{tournamentId, tournamentName, dateEnd, fantasyPoints, matches, aces, attackKills, …}, …] }`, chronological (oldest first). Drives Konsistent (variance), Form-Trend, side-out indicators, and the history tables in the why-modal + H2H. |
+| `data/.cache/` | Disk caches: DVV scrapes (1 h), gbt.hanski.de bracket fallback (1 h), H2H per-pair (24 h), Firestore snapshot (10 min), per-tournament stats (forever for completed tournaments, 10 min otherwise). Wipe or pass `--force-refresh` to bypass. |
 
 ## Backend API (`scripts/serve.py`)
 
@@ -138,7 +139,8 @@ Up to five algorithms run on every "Team Optimieren" click — the comparison ta
 | Algorithm | Objective metric | Enabled when |
 |---|---|---|
 | **Optimal** (B&B) | `Σ avgPerTournament` | always |
-| **Konsistent** (B&B) | `Σ adjustedPT` (Bayes shrinkage, k=3) | always |
+| **Konsistent** (B&B) | `Σ varianceScore` (`mean − 0.5·stdDev` of per-tournament `fantasyPoints`) with `adjustedPT` (Bayes shrinkage, k=3) as fallback for <3-tournament players | always |
+| **Form-Trend** (B&B) | `Σ formScore` (`0.5·last + 0.3·2nd-last + 0.2·3rd-last` of `fantasyPoints`) | ≥1 player has ≥3 tournaments in `player_history.json` |
 | **Turnier-Prognose** (B&B) | `Σ (avgPerMatch × expectedMatches)` | `tournament_sim.json` exists |
 | **Turnier-Manuell** (B&B) | `Σ (avgPerMatch × manualExpectedMatches)` | manual bracket overrides exist |
 | **Finale-Fokus** (B&B) | `Σ finalRoundObjective` (`roundLevel × 1000 + avgPerTournament` — primary axis = reaching semi (1000) / final (2000), tiebreaker = season avg) | `tournament_sim.json` exists |

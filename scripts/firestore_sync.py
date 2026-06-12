@@ -425,6 +425,175 @@ def _overlay_tournament_prices(players: dict[str, dict],
     return changed
 
 
+# ── Per-Turnier-Stats (tournaments/<id>/stats/<playerId>) ─────────────────────
+#
+# Diese Subcollection enthält pro Spieler pro Turnier `fantasyPoints` + Skill-
+# Stats (aces, attackKills, blockKills, digs, receptionGood, …). Aktuell von
+# `season_stats` NICHT abgedeckt — `season_stats` ist nur die Saison-Summe.
+# Wir bauen daraus `data/player_history.json` für die Frontend-Algorithmen
+# (Varianz-basierter Konsistenz-Score, Form-Trend) und Anzeige (Modal + H2H).
+
+# Felder, die wir aus jedem Stats-Doc übernehmen (alle integer/double).
+_STATS_NUMERIC_FIELDS = (
+    "fantasyPoints", "aces",
+    "attackKills", "attackError", "attackBlocked", "attackBad",
+    "blockKills", "blockGood", "blockErrors",
+    "digs",
+    "receptionGood", "receptionBad", "receptionError",
+    "serveGood", "serveErrors", "serveOverpass",
+    "settingErrors", "overpass",
+)
+
+
+def _list_all_tournament_docs(id_token: str) -> list[dict]:
+    """Holt die gesamte tournaments/-Liste. Wird sowohl für Preis-Override
+    (`fetch_current_tournament_players`) als auch für Stats-Sync benutzt."""
+    r = requests.get(
+        TOURNAMENTS_LIST_URL,
+        headers={"Authorization": f"Bearer {id_token}"},
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json().get("documents", [])
+
+
+def _season_tournaments(docs: list[dict], year: int) -> list[dict]:
+    """Filter auf Turniere, deren `start` im gegebenen Saison-Jahr liegt.
+    Returns chronologisch sortiert (ältestes zuerst), jeweils:
+        {id, name, dateStart, dateEnd, completed: bool}
+    """
+    today = datetime.date.today().isoformat()
+    out = []
+    for d in docs:
+        f = d.get("fields", {})
+        start = (f.get("start") or {}).get("timestampValue", "")[:10]
+        end   = (f.get("end")   or {}).get("timestampValue", "")[:10]
+        if not start or not start.startswith(str(year)):
+            continue
+        tid  = d["name"].rsplit("/", 1)[-1]
+        name = (f.get("name") or {}).get("stringValue", "?")
+        out.append({
+            "id":        tid,
+            "name":      name,
+            "dateStart": start,
+            "dateEnd":   end,
+            "completed": bool(end) and end < today,
+        })
+    out.sort(key=lambda x: x["dateStart"])
+    return out
+
+
+def fetch_tournament_stats(id_token: str, tournament_id: str,
+                            completed: bool, force: bool = False
+                            ) -> dict[str, dict] | None:
+    """Holt tournaments/<tid>/stats und gibt {playerId: statsDict} zurück.
+
+    Cache-Policy: abgeschlossene Turniere werden ewig gecacht (TTL=∞),
+    laufende/anstehende für 10 min. Returns None bei Fetch-Fehler.
+    """
+    cache_path = CACHE_DIR / f"tournament_stats_{tournament_id}.json"
+    if not force and cache_path.exists():
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                entry = json.load(f)
+            age = time.time() - entry.get("fetched_at", 0)
+            if completed or age < SNAPSHOT_TTL_SECONDS:
+                return entry["data"]
+        except Exception:
+            pass   # fall through to refetch
+
+    url = (f"https://firestore.googleapis.com/v1/projects/gbt-fantasy/"
+           f"databases/(default)/documents/tournaments/{tournament_id}/stats"
+           f"?pageSize=300")
+    try:
+        r = requests.get(url, headers={"Authorization": f"Bearer {id_token}"}, timeout=15)
+        if r.status_code == 404:
+            return {}   # tournament has no stats yet (upcoming/quali only)
+        r.raise_for_status()
+        docs = r.json().get("documents", [])
+    except Exception as e:
+        print(f"  WARN tournament_stats {tournament_id} fehlgeschlagen: {e}",
+              file=sys.stderr)
+        return None
+
+    out: dict[str, dict] = {}
+    for d in docs:
+        pid = d["name"].rsplit("/", 1)[-1]
+        fields = d.get("fields") or {}
+        rec: dict[str, float | int] = {}
+        for k in _STATS_NUMERIC_FIELDS:
+            v = _fs_val(fields.get(k))
+            if v is None:
+                continue
+            rec[k] = v
+        if not rec:
+            continue
+        # `statsPerMatch` ist eine Map matchId -> stats. Anzahl Matches reicht uns
+        # erstmal (für playerHistory). Match-Granularität ist Phase 4.
+        spm = _fs_val(fields.get("statsPerMatch")) or {}
+        rec["matches"] = len(spm) if isinstance(spm, dict) else 0
+        out[pid] = rec
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({"fetched_at": time.time(), "data": out},
+                      f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  WARNING: konnte {cache_path.name} nicht schreiben: {e}",
+              file=sys.stderr)
+    return out
+
+
+def build_player_history(id_token: str, years: list[int] | int,
+                          force: bool = False) -> dict[str, list[dict]]:
+    """Aggregiert tournaments/<tid>/stats über alle Turniere der gegebenen
+    Saison-Jahre zu
+        { "<playerId>": [ {tournamentId, tournamentName, dateEnd,
+                            fantasyPoints, matches, aces, attackKills, …},
+                          … chronologisch sortiert, neuestes zuletzt ] }
+    Sorgsam: Turniere ohne Stats (Status pending, Quali nicht durch) werden
+    übersprungen. `years` kann ein einzelnes Jahr oder eine Liste sein —
+    wir fetchen die tournaments/-Liste einmal und filtern dann pro Jahr.
+    """
+    if isinstance(years, int):
+        years = [years]
+    try:
+        docs = _list_all_tournament_docs(id_token)
+    except Exception as e:
+        print(f"  WARN tournaments-Liste-Fetch für History fehlgeschlagen: {e}",
+              file=sys.stderr)
+        return {}
+
+    history: dict[str, list[dict]] = {}
+    fetched, skipped = 0, 0
+    seen_ids: set[str] = set()   # de-dupe across years (old + new IDs of same event)
+    for year in years:
+        for t in _season_tournaments(docs, year):
+            if t["id"] in seen_ids:
+                continue
+            seen_ids.add(t["id"])
+            stats = fetch_tournament_stats(id_token, t["id"], t["completed"], force=force)
+            if not stats:
+                skipped += 1
+                continue
+            fetched += 1
+            for pid, rec in stats.items():
+                entry = dict(rec)
+                entry["tournamentId"]   = t["id"]
+                entry["tournamentName"] = t["name"]
+                entry["dateEnd"]        = t["dateEnd"]
+                history.setdefault(pid, []).append(entry)
+
+    # Pro Spieler chronologisch sortieren (ältestes zuerst → neuestes zuletzt).
+    for pid in history:
+        history[pid].sort(key=lambda x: x.get("dateEnd", ""))
+
+    print(f"  ✓ Player-History: {fetched} Turniere mit Stats geladen "
+          f"({skipped} ohne), {len(history)} Spieler.")
+    return history
+
+
 # ── Disk-Cache ────────────────────────────────────────────────────────────────
 
 def _load_cached_snapshot(ttl: int = SNAPSHOT_TTL_SECONDS):
@@ -539,6 +708,17 @@ def fetch_firestore_season(force: bool = False) -> dict[str, dict] | None:
         except Exception as e:
             print(f"  WARNING: Archive-Fetch {year} fehlgeschlagen: {e}",
                   file=sys.stderr)
+
+    # Per-Turnier-Stats über ALLE Saison-Jahre -> data/player_history.json.
+    # Abgeschlossene Turniere sind dank Cache (TTL forever) idempotent, also
+    # kostet das nur beim allerersten Lauf pro Jahr Netzwerk.
+    try:
+        history = build_player_history(id_token, years=season_years(), force=force)
+        if history:
+            with open(DATA_DIR / "player_history.json", "w", encoding="utf-8") as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"  WARNING: Player-History-Fetch fehlgeschlagen: {e}", file=sys.stderr)
 
     return players
 

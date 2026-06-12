@@ -1059,6 +1059,46 @@ input:focus, select:focus {
     margin-left: 0.3rem;
 }
 .why-objective-val { color: var(--accent); font-size: 1.05rem; }
+.why-row-hint { color: var(--text-dim); font-size: 0.75rem; margin-left: 0.3rem; }
+.why-history thead th {
+    text-align: left;
+    color: var(--text-dim);
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.3rem 0.5rem;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.why-history thead th:nth-child(n+2) { text-align: right; }
+.why-history-year td {
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.5rem 0.5rem 0.25rem;
+    border-bottom: 1px solid rgba(255,255,255,0.12);
+    background: rgba(255,255,255,0.02);
+}
+.h2h-history-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+.h2h-history-name {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 0.4rem;
+    text-align: center;
+}
+.h2h-no-history {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 0.5rem;
+}
+@media (max-width: 640px) {
+    .h2h-history-grid { grid-template-columns: 1fr; }
+}
 
 .why-explanation {
     color: var(--text);
