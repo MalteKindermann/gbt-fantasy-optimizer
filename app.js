@@ -314,6 +314,10 @@ async function loadSimFile() {
         showSyncWarnings(tournamentSim.syncInfo);
         const opt = document.getElementById('algTournament');
         if (opt) { opt.disabled = false; opt.title = ''; }
+        // If the bracket tab is currently visible, refresh it so the user sees the
+        // newly-loaded bracket instead of the "wird berechnet…" placeholder.
+        const bracketTab = document.getElementById('bracketTab');
+        if (bracketTab && bracketTab.classList.contains('active')) renderBracket();
         return true;
     } catch (_) { return false; }
 }
@@ -688,17 +692,53 @@ async function ensureTournamentSim() {
     const reason = !status.exists ? 'noch nicht berechnet' :
                    !status.playersHashMatch ? 'Spielerliste hat sich geändert' :
                    'Daten älter als 6 h';
-    showSimBanner(`Turnier-Prognose wird berechnet (${reason})…`, 'loading');
+    await waitForSim(reason);
+}
+
+// Trigger sim and poll status until fresh. Survives 409 (another tab is running it),
+// network timeouts on the long POST, and partial file writes. Updates the banner with
+// a live seconds counter so the user can see progress instead of an instant error.
+async function waitForSim(reason) {
+    const startedAt = Date.now();
+    const POLL_INTERVAL_MS = 3000;
+    const TIMEOUT_MS = 4 * 60 * 1000;   // 4 min — sim should finish in well under 2
+
+    const tickBanner = () => {
+        const secs = Math.floor((Date.now() - startedAt) / 1000);
+        showSimBanner(`Turnier-Prognose wird berechnet (${reason}) … ${secs}s`, 'loading');
+    };
+    tickBanner();
+    const bannerTimer = setInterval(tickBanner, 1000);
+
+    // Kick off the sim. We don't await this — the server may take longer than the
+    // browser's idle timeout, and a 409 just means another tab already started one.
+    // We rely on the polling loop below to detect completion.
+    apiFetch('/api/simulate?gender=all', { method: 'POST' }).catch(() => {});
 
     try {
-        const r = await apiFetch('/api/simulate?gender=all', { method: 'POST' });
-        if (!r.ok) throw new Error('simulate failed: ' + r.status);
-        const result = await r.json();
-        await loadSimFile();
-        showSimBanner(`✓ Prognose aktualisiert (${result.duration_s}s)`, 'success');
-        setTimeout(hideSimBanner, 3000);
-    } catch (err) {
-        showSimBanner(`Fehler bei Berechnung: ${err.message}`, 'warn');
+        while (Date.now() - startedAt < TIMEOUT_MS) {
+            await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+            let status = null;
+            try {
+                const r = await apiFetch('/api/sim-status');
+                if (r.ok) status = await r.json();
+            } catch (_) { /* transient network blip — keep polling */ }
+            if (status && status.exists && status.fresh) {
+                const ok = await loadSimFile();
+                if (ok) {
+                    const dur = Math.round((Date.now() - startedAt) / 1000);
+                    showSimBanner(`✓ Prognose aktualisiert (${dur}s)`, 'success');
+                    setTimeout(hideSimBanner, 3000);
+                    return;
+                }
+            }
+        }
+        showSimBanner(
+            '⚠ Berechnung dauert ungewöhnlich lange. <a href="javascript:location.reload()">Seite neu laden</a>.',
+            'warn'
+        );
+    } finally {
+        clearInterval(bannerTimer);
     }
 }
 
@@ -875,7 +915,11 @@ let bracketGender = 'm';
 function renderBracket() {
     const view = document.getElementById('bracketView');
     if (!tournamentSim || !tournamentSim.byGender) {
-        view.innerHTML = '<div class="no-results">Keine Sim-Daten geladen.</div>';
+        const banner = document.getElementById('simBanner');
+        const loading = banner && banner.dataset.mode === 'loading';
+        view.innerHTML = loading
+            ? '<div class="no-results"><span class="sim-spinner"></span> Bracket-Vorhersage wird berechnet…</div>'
+            : '<div class="no-results">Keine Sim-Daten geladen.</div>';
         return;
     }
     const block = tournamentSim.byGender[bracketGender];
