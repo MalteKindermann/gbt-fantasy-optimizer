@@ -638,6 +638,14 @@ function escapeHtml(s) {
 function escapeAttr(s) { return escapeHtml(s); }
 
 function showSyncWarnings(info) {
+    // Sync warnings only make sense for admins — they're about Fantasy player
+    // bookkeeping (price changes, unrecognised names) that elo accounts can't
+    // act on anyway.
+    if (!roleAtLeast(window.USER_ROLE, 'admin')) {
+        const existing = document.getElementById('syncWarnings');
+        if (existing) existing.remove();
+        return;
+    }
     const container = document.getElementById('syncWarnings') || (() => {
         const d = document.createElement('div');
         d.id = 'syncWarnings';
@@ -3664,6 +3672,12 @@ function applyRoleVisibility(role) {
         const eloBtn = Array.from(document.querySelectorAll('.tab'))
             .find(b => (b.getAttribute('onclick') || '').includes("switchTab('elo'"));
         if (eloBtn && !eloBtn.hidden) switchTab('elo', eloBtn);
+    }
+    // Drop admin-only transient elements that might have rendered before the
+    // role applied (sync warnings, sim banner).
+    if (!roleAtLeast(role, 'admin')) {
+        const sw = document.getElementById('syncWarnings'); if (sw) sw.remove();
+        const sb = document.getElementById('simBanner');    if (sb) sb.remove();
     }
 }
 
