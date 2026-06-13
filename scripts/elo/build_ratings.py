@@ -847,10 +847,10 @@ def phase_build(train_end_date: Optional[str] = None,
               f"{oos_acc:>8}  {oos_cal:>7}  {m['n_players']:>8}")
 
     # Write comparison meta — always, on both training modes
-    from datetime import date as _dt
+    from datetime import datetime as _dt, timezone as _tz
     meta_path = DATA / "elo_models_meta.json"
     meta_path.write_text(json.dumps({
-        "generated_at": _dt.today().isoformat(),
+        "generated_at": _dt.now(_tz.utc).isoformat(timespec="seconds"),
         "train_end_date": train_end_date,
         "oos_cutoff": oos_cutoff if not train_end_date else train_end_date,
         "models": metas,

@@ -668,6 +668,31 @@ input:focus, select:focus {
 .elo-refresh-banner.error { border-left-color: #f87171; }
 .elo-refresh-banner.idle  { display: none; }
 
+.elo-stale-banner {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-left: 3px solid #facc15;
+    border-radius: 6px;
+    padding: 0.5rem 0.8rem;
+    margin-bottom: 0.7rem;
+    font-size: 0.88rem;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+.elo-stale-banner button {
+    background: var(--accent);
+    color: var(--bg-dark);
+    border: none;
+    border-radius: 4px;
+    padding: 0.3rem 0.7rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-left: auto;
+}
+
 /* ─── ELO Tuning tab ──────────────────────────────────────────────────── */
 
 .elotune-controls {

@@ -992,6 +992,7 @@ async function renderEloRanking() {
         } catch { _eloMeta = { models: [] }; }
         _updateEloModelStats();
     }
+    _maybeShowStaleBanner(_eloMeta);
     // Load the currently-selected model's player list (with cache per model)
     if (!_eloDataByModel[_eloCurrentModel]) {
         try {
@@ -1011,6 +1012,23 @@ async function renderEloRanking() {
 }
 
 let _eloFiltersWired = false;
+
+// Show a "Daten X h alt — Neu berechnen" banner when elo_models_meta.json's
+// generated_at is older than 24h. Only visible for elo_lab+ (viewer can't act
+// on it). Doesn't touch #eloRefreshBanner (reserved for active-refresh state).
+function _maybeShowStaleBanner(meta) {
+    const el = document.getElementById('eloStaleBanner');
+    if (!el) return;
+    if (!roleAtLeast(window.USER_ROLE, 'elo_lab')) { el.hidden = true; return; }
+    const ts = meta && meta.generated_at;
+    if (!ts) { el.hidden = true; return; }
+    const ageMs = Date.now() - new Date(ts).getTime();
+    if (!isFinite(ageMs) || ageMs < 24 * 3600 * 1000) { el.hidden = true; return; }
+    const hours = Math.round(ageMs / 3600 / 1000);
+    el.innerHTML = `⚠ ELO-Daten sind ${hours} h alt. `
+        + `<button onclick="_eloTriggerRefresh()">🔄 Jetzt neu berechnen</button>`;
+    el.hidden = false;
+}
 
 function _updateEloModelStats() {
     const el = document.getElementById('eloModelStats');
