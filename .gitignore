@@ -15,6 +15,9 @@ data/players_season_*.json
 data/tournament_sim.json
 data/bracket_m.json
 data/bracket_f.json
+data/raw
+data/
+
 
 # Disk caches (DVV / GBT bracket / H2H / Firestore-Snapshot)
 data/.cache/
@@ -40,3 +43,4 @@ Thumbs.db
 .claude/
 # Claude Code context file — local only, single-machine workflow.
 CLAUDE.md
+/data/player_history.json
