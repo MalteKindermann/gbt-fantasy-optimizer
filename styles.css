@@ -499,6 +499,261 @@ input:focus, select:focus {
     margin-bottom: 0;
 }
 
+/* ─── ELO ranking tab ──────────────────────────────────────────────────── */
+
+.elo-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem 1.5rem;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 1rem;
+}
+.elo-search {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    min-width: 220px;
+    flex: 1 1 220px;
+}
+.elo-search:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+.elo-filter-group {
+    display: flex;
+    gap: 0.4rem;
+}
+.elo-filter-group .filter-pill {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    padding: 0.35rem 0.85rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: all 0.12s ease;
+}
+.elo-filter-group .filter-pill:hover {
+    border-color: var(--accent-dim);
+    color: var(--text);
+}
+.elo-filter-group .filter-pill.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #001;
+    font-weight: 700;
+}
+.elo-active-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    cursor: pointer;
+}
+.elo-active-toggle input { accent-color: var(--accent); }
+
+.elo-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.elo-table thead {
+    background: var(--bg-dark);
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.elo-table th, .elo-table td {
+    padding: 0.55rem 0.9rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+.elo-table th {
+    font-weight: 600;
+    cursor: default;
+}
+.elo-table tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+.elo-table tbody tr:last-child td { border-bottom: 0; }
+.elo-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.elo-table .rank { color: var(--text-dim); width: 3rem; }
+.elo-table .elo-cell { font-weight: 700; color: var(--accent); }
+.elo-table .country-cell { color: var(--text-dim); font-size: 0.85rem; }
+.elo-table .gender-cell { width: 1.5rem; text-align: center; }
+
+.elo-summary {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    margin: 0.4rem 0 0.7rem;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+/* ─── Model picker (used in both ELO ranking + tuning tabs) ──────────── */
+
+.elo-model-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.7rem;
+    padding: 0.5rem 0.8rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.elo-model-bar label {
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+.elo-model-select {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.35rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    min-width: 180px;
+}
+.elo-model-select:focus { outline: none; border-color: var(--accent); }
+.elo-model-stats {
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-family: 'JetBrains Mono', monospace;
+    flex: 1;
+    text-align: right;
+}
+.elo-refresh-btn {
+    background: var(--bg-dark);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 0.35rem 0.7rem;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+.elo-refresh-btn:hover { border-color: var(--accent); background: var(--bg-card); }
+.elo-refresh-btn:disabled { opacity: 0.55; cursor: progress; }
+.elo-refresh-banner {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 6px;
+    padding: 0.5rem 0.8rem;
+    margin-bottom: 0.7rem;
+    font-size: 0.88rem;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+.elo-refresh-banner.ok    { border-left-color: #4ade80; }
+.elo-refresh-banner.error { border-left-color: #f87171; }
+.elo-refresh-banner.idle  { display: none; }
+
+/* ─── ELO Tuning tab ──────────────────────────────────────────────────── */
+
+.elotune-controls {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+.elotune-sliders {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 0.6rem 1.5rem;
+    margin-bottom: 0.8rem;
+}
+.elotune-slider {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 0.4rem 0.7rem;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+}
+.elotune-slider label {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-dim);
+}
+.elotune-slider label .val {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.95rem;
+}
+.elotune-slider input[type="range"] {
+    grid-column: 1 / -1;
+    width: 100%;
+    accent-color: var(--accent);
+}
+.elotune-actions {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border);
+}
+.elotune-actions .btn { min-width: 160px; }
+.elotune-result-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.5rem 1.2rem;
+    padding: 0.8rem 1rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 1rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.88rem;
+}
+.elotune-result-meta .stat-label {
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    display: block;
+    margin-bottom: 0.2rem;
+}
+.elotune-result-meta .stat-val {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 1.1rem;
+}
+.elotune-calib {
+    margin: 0.5rem 0 1rem;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+    font-family: 'JetBrains Mono', monospace;
+}
+.elotune-calib th, .elotune-calib td {
+    padding: 0.3rem 0.7rem;
+    text-align: right;
+    border-bottom: 1px solid var(--border);
+}
+.elotune-calib th { color: var(--text-dim); text-align: center; }
+.elotune-calib td:first-child { text-align: left; color: var(--text-dim); }
+
 .bracket-gender-toggle .filter-pill {
     background: var(--bg-dark);
     border: 1px solid var(--border);

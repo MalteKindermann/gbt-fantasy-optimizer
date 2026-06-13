@@ -17,9 +17,29 @@ const supa = AUTH_ENABLED && window.supabase
     })
     : null;
 
+// ── Role-based permissions ─────────────────────────────────────────────────
+// Roles flow from JWT (`app_metadata.role`, set via Supabase Dashboard).
+// Self-Host (no auth) acts as admin so every check is a no-op.
+const ROLE_ORDER = { elo_viewer: 0, elo_lab: 1, admin: 2 };
+const DEFAULT_ROLE = 'elo_viewer';
+
+function _decodeRole(session) {
+    if (!AUTH_ENABLED) return 'admin';
+    const raw = session?.user?.app_metadata?.role;
+    return (raw in ROLE_ORDER) ? raw : DEFAULT_ROLE;
+}
+
+function roleAtLeast(have, need) {
+    return (ROLE_ORDER[have] ?? -1) >= (ROLE_ORDER[need] ?? 99);
+}
+
+// Set early so any pre-login code that touches USER_ROLE doesn't see undefined.
+window.USER_ROLE = AUTH_ENABLED ? DEFAULT_ROLE : 'admin';
+
 // Wraps fetch():
 //  • Prefixes /api/* and data/* paths with API_BASE (if set).
 //  • Attaches Authorization: Bearer <token> when a Supabase session exists.
+//  • Shows a one-time banner on 403 ("forbidden") so the user understands why.
 async function apiFetch(path, opts = {}) {
     let url = path;
     if (API_BASE && (path.startsWith('/api/') || path.startsWith('/data/') || path.startsWith('data/'))) {
@@ -34,7 +54,26 @@ async function apiFetch(path, opts = {}) {
             if (tok) headers.set('Authorization', 'Bearer ' + tok);
         } catch (_) { /* no session — request proceeds unauthenticated */ }
     }
-    return fetch(url, { ...opts, headers });
+    const res = await fetch(url, { ...opts, headers });
+    if (res.status === 403) _showForbiddenBanner();
+    return res;
+}
+
+function _showForbiddenBanner() {
+    if (sessionStorage.getItem('authBannerShown') === '1') return;
+    sessionStorage.setItem('authBannerShown', '1');
+    let el = document.getElementById('authBanner');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'authBanner';
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;'
+            + 'background:#7a2a2a;color:#fff;padding:0.6rem 1rem;text-align:center;'
+            + 'font-size:0.9rem;box-shadow:0 2px 6px rgba(0,0,0,0.4)';
+        el.innerHTML = 'Keine Berechtigung für diese Aktion — frage deinen Admin. '
+            + '<a href="#" style="color:#ffd;text-decoration:underline;margin-left:0.5rem" '
+            + 'onclick="this.parentElement.remove();return false;">schließen</a>';
+        document.body.appendChild(el);
+    }
 }
 
 async function logoutUser() {
@@ -275,6 +314,15 @@ async function loadPlayerData() {
 
 // Initial app entry point — loads data and triggers sim freshness check
 async function loadData() {
+    // Fantasy data (players_available.json, tournament_sim.json,
+    // player_history.json, season overlays) is admin-only on the backend.
+    // Non-admins land on the ELO ranking tab which loads its own data.
+    if (!roleAtLeast(window.USER_ROLE, 'admin')) {
+        const eloBtn = Array.from(document.querySelectorAll('.tab'))
+            .find(b => (b.getAttribute('onclick') || '').includes("switchTab('elo'"));
+        if (eloBtn) switchTab('elo', eloBtn);
+        return;
+    }
     try {
         await loadPlayerData();
         await ensureTournamentSim();
@@ -899,6 +947,484 @@ function switchTab(tab, el) {
     else if (tab === 'picks')   renderPicksTab();
     else if (tab === 'compare') renderCompare();
     else if (tab === 'bracket') renderBracket();
+    else if (tab === 'elo')     renderEloRanking();
+    else if (tab === 'elotune') renderEloTuning();
+}
+
+// ── ELO ranking tab ──────────────────────────────────────────────────────────
+//
+// Reads data/elo_current.json (produced by `python scripts/elo/build_ratings.py
+// --phase build`). Standalone from the rest of the algorithm pipeline — this is
+// an inspection view, not yet wired into team picking.
+
+const _eloDataByModel = {};     // model_id → parsed JSON cache
+let _eloMeta = null;            // comparison meta for the stats line
+let _eloCurrentModel = 'elo';
+let _eloFilters = {
+    country: 'all',             // 'all' | 'germany' | 'intl'
+    gender:  'all',             // 'all' | 'm' | 'f'
+    search:  '',
+    activeOnly: true,
+};
+
+async function renderEloRanking() {
+    const host = document.getElementById('eloRanking');
+    if (!host) return;
+
+    // First entry into the tab: wire the filter/model-select handlers once
+    if (!_eloFiltersWired) {
+        _wireEloFilters();
+        _eloFiltersWired = true;
+    }
+    // Preload meta for the comparison line (best-effort)
+    if (_eloMeta === null) {
+        try {
+            const r = await fetch('data/elo_models_meta.json?t=' + Date.now());
+            _eloMeta = r.ok ? await r.json() : { models: [] };
+        } catch { _eloMeta = { models: [] }; }
+        _updateEloModelStats();
+    }
+    // Load the currently-selected model's player list (with cache per model)
+    if (!_eloDataByModel[_eloCurrentModel]) {
+        try {
+            const r = await fetch(`data/${_eloCurrentModel}_current.json?t=` + Date.now());
+            if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+            _eloDataByModel[_eloCurrentModel] = await r.json();
+        } catch (e) {
+            host.innerHTML = `<div class="no-results">
+                ${_eloCurrentModel.toUpperCase()}-Daten nicht verfügbar (${e.message}).<br><br>
+                Einmal laufen lassen:<br>
+                <code>python scripts/elo/build_ratings.py --phase build</code>
+            </div>`;
+            return;
+        }
+    }
+    _drawEloRanking();
+}
+
+let _eloFiltersWired = false;
+
+function _updateEloModelStats() {
+    const el = document.getElementById('eloModelStats');
+    if (!el || !_eloMeta || !_eloMeta.models) return;
+    el.innerHTML = _eloMeta.models.map(m => {
+        const acc = m.oos_acc != null ? (m.oos_acc * 100).toFixed(1) + '%' : '–';
+        const cal = m.oos_calib != null ? m.oos_calib.toFixed(3) : '–';
+        const cls = m.id === _eloCurrentModel ? 'active' : '';
+        return `<span class="${cls}" style="margin-left:0.8rem">${m.id}: OOS ${acc} · calib ${cal}</span>`;
+    }).join('');
+}
+
+function _wireEloFilters() {
+    const sel = document.getElementById('eloModelSelect');
+    if (sel) {
+        sel.value = _eloCurrentModel;
+        sel.addEventListener('change', () => {
+            _eloCurrentModel = sel.value;
+            _updateEloModelStats();
+            renderEloRanking();
+        });
+    }
+    document.querySelectorAll('#eloCountryFilter .filter-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#eloCountryFilter .filter-pill')
+                .forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            _eloFilters.country = btn.dataset.country;
+            _drawEloRanking();
+        });
+    });
+    document.querySelectorAll('#eloGenderFilter .filter-pill').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#eloGenderFilter .filter-pill')
+                .forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            _eloFilters.gender = btn.dataset.gender;
+            _drawEloRanking();
+        });
+    });
+    const search = document.getElementById('eloSearch');
+    if (search) {
+        search.addEventListener('input', e => {
+            _eloFilters.search = e.target.value.trim().toLowerCase();
+            _drawEloRanking();
+        });
+    }
+    const active = document.getElementById('eloActiveOnly');
+    if (active) {
+        active.addEventListener('change', e => {
+            _eloFilters.activeOnly = e.target.checked;
+            _drawEloRanking();
+        });
+    }
+    const refreshBtn = document.getElementById('eloRefreshBtn');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => _eloTriggerRefresh());
+    }
+}
+
+// ── Smart ELO refresh: fires backend job + polls status ─────────────────────
+let _eloRefreshPolling = false;
+
+function _showEloRefreshBanner(text, kind) {
+    const el = document.getElementById('eloRefreshBanner');
+    if (!el) return;
+    el.hidden = false;
+    el.className = 'elo-refresh-banner' + (kind ? ' ' + kind : '');
+    el.textContent = text;
+}
+
+async function _eloTriggerRefresh() {
+    if (_eloRefreshPolling) return;
+    const btn = document.getElementById('eloRefreshBtn');
+    if (btn) btn.disabled = true;
+    _showEloRefreshBanner('⏳ Starte Update-Check…', '');
+    try {
+        const r = await apiFetch('/api/elo-refresh', {method: 'POST'});
+        if (!r.ok && r.status !== 202 && r.status !== 409) {
+            const j = await r.json().catch(() => ({}));
+            _showEloRefreshBanner('❌ ' + (j.error || ('HTTP ' + r.status)), 'error');
+            if (btn) btn.disabled = false;
+            return;
+        }
+        // 202 = started, 409 = already running → both are fine, poll
+    } catch (e) {
+        _showEloRefreshBanner('❌ Netzwerkfehler: ' + e.message, 'error');
+        if (btn) btn.disabled = false;
+        return;
+    }
+    _eloRefreshPolling = true;
+    _eloPollRefresh();
+}
+
+async function _eloPollRefresh() {
+    try {
+        const r = await apiFetch('/api/elo-refresh-status');
+        const s = await r.json();
+        if (s.phase === 'done') {
+            const sum = s.summary || {};
+            const delta = (sum.matches_after ?? 0) - (sum.matches_before ?? 0);
+            if (sum.rebuilt) {
+                _showEloRefreshBanner(
+                    `✅ ${delta > 0 ? '+' : ''}${delta} neue Matches · Modelle neu gebaut`,
+                    'ok'
+                );
+                // Refresh in-page data
+                Object.keys(_eloDataByModel).forEach(k => delete _eloDataByModel[k]);
+                _eloMeta = null;
+                renderEloRanking();
+            } else {
+                _showEloRefreshBanner(
+                    `✅ Datenstand aktuell (${sum.matches_after?.toLocaleString() ?? '?'} Matches, kein Rebuild nötig)`,
+                    'ok'
+                );
+            }
+            _eloRefreshDone();
+            return;
+        }
+        if (s.phase === 'error') {
+            _showEloRefreshBanner('❌ ' + (s.message || 'unbekannter Fehler'), 'error');
+            _eloRefreshDone();
+            return;
+        }
+        const phaseEmoji = {
+            discovering: '🔍', fetching: '⬇️',
+            checking: '🔎', building: '🛠️',
+        }[s.phase] || '⏳';
+        _showEloRefreshBanner(`${phaseEmoji} ${s.message || s.phase}…`, '');
+        setTimeout(_eloPollRefresh, 2000);
+    } catch (e) {
+        _showEloRefreshBanner('⚠ Polling-Fehler: ' + e.message, 'error');
+        _eloRefreshDone();
+    }
+}
+
+function _eloRefreshDone() {
+    _eloRefreshPolling = false;
+    const btn = document.getElementById('eloRefreshBtn');
+    if (btn) btn.disabled = false;
+}
+
+function _normaliseStr(s) {
+    return (s || '').toLowerCase().normalize('NFKD')
+        .replace(/[̀-ͯ]/g, '');
+}
+
+function _drawEloRanking() {
+    const host = document.getElementById('eloRanking');
+    const data = _eloDataByModel[_eloCurrentModel];
+    if (!host || !data) return;
+    const players = data.players || [];
+
+    // 2-year activity cutoff for "active" filter
+    const cutoffDate = (() => {
+        const d = new Date();
+        d.setFullYear(d.getFullYear() - 2);
+        return d.toISOString().slice(0, 10);
+    })();
+
+    const search = _normaliseStr(_eloFilters.search);
+    const filtered = players.filter(p => {
+        if (_eloFilters.gender !== 'all' && p.gender !== _eloFilters.gender) return false;
+        if (_eloFilters.country === 'germany'
+                && _normaliseStr(p.country) !== 'germany') return false;
+        if (_eloFilters.country === 'intl'
+                && _normaliseStr(p.country) === 'germany') return false;
+        if (_eloFilters.activeOnly) {
+            if ((p.matches || 0) < 5) return false;
+            if (!p.last_active || p.last_active < cutoffDate) return false;
+        }
+        if (search) {
+            const hay = _normaliseStr(p.name) + ' ' + _normaliseStr(p.country);
+            if (!hay.includes(search)) return false;
+        }
+        return true;
+    });
+
+    filtered.sort((a, b) => (b.elo_combined || b.elo_individual)
+                          - (a.elo_combined || a.elo_individual));
+
+    if (!filtered.length) {
+        host.innerHTML = `<div class="elo-summary">0 / ${players.length} Spieler</div>
+            <div class="no-results">Keine Treffer für diese Filter.</div>`;
+        return;
+    }
+
+    const summary = `<div class="elo-summary">
+        ${filtered.length.toLocaleString('de-DE')} / ${players.length.toLocaleString('de-DE')} Spieler
+    </div>`;
+
+    const visible = filtered.slice(0, 500);   // safety cap on DOM nodes
+    const rows = visible.map((p, i) => `
+        <tr>
+            <td class="rank num">${i + 1}</td>
+            <td class="gender-cell">${p.gender === 'm' ? '♂' : p.gender === 'f' ? '♀' : ''}</td>
+            <td>${_escapeHtml(p.name)}</td>
+            <td class="country-cell">${_escapeHtml(p.country || '—')}</td>
+            <td class="num elo-cell">${Math.round(p.elo_combined || p.elo_individual)}</td>
+            <td class="num">${p.matches}</td>
+            <td class="num country-cell">${p.last_active || ''}</td>
+        </tr>
+    `).join('');
+    const more = filtered.length > visible.length
+        ? `<div class="elo-summary">… ${filtered.length - visible.length} weitere ausgeblendet (Filter verfeinern)</div>`
+        : '';
+
+    host.innerHTML = summary + `
+        <table class="elo-table">
+            <thead><tr>
+                <th class="num">#</th>
+                <th></th>
+                <th>Name</th>
+                <th>Land</th>
+                <th class="num">ELO</th>
+                <th class="num">Matches</th>
+                <th class="num">Zuletzt aktiv</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>` + more;
+}
+
+function _escapeHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+}
+
+// ── ELO Tuning tab ───────────────────────────────────────────────────────────
+//
+// POSTs custom EloConfig to /api/elo-recompute, shows the resulting top list
+// and backtest accuracy. Sandbox only — does NOT touch elo_current.json.
+
+// Tuning state. Sliders are now driven by the server-side schema endpoint
+// so each model exposes its own knobs (K/blend for ELO, τ/φ for Glicko-2,
+// β/τ/σ for TrueSkill).
+let _elotuneState = {};
+let _elotuneSchema = null;       // {sliders: [{key,label,min,max,step,default,fmt}, ...]}
+let _elotuneModel  = 'elo';
+let _elotuneWired = false;
+
+function _fmtVal(v, fmt) {
+    if (fmt === 'int')  return Math.round(v).toString();
+    if (fmt === 'f1')   return Number(v).toFixed(1);
+    if (fmt === 'f2')   return Number(v).toFixed(2);
+    if (fmt === 'f3')   return Number(v).toFixed(3);
+    return String(v);
+}
+
+async function renderEloTuning() {
+    if (!_elotuneWired) {
+        const sel = document.getElementById('elotuneModelSelect');
+        if (sel) {
+            sel.value = _elotuneModel;
+            sel.addEventListener('change', async () => {
+                _elotuneModel = sel.value;
+                await _loadElotuneSchema();
+            });
+        }
+        _elotuneWired = true;
+    }
+    if (!_elotuneSchema || _elotuneSchema.model !== _elotuneModel) {
+        await _loadElotuneSchema();
+    }
+}
+
+async function _loadElotuneSchema() {
+    const host = document.getElementById('elotuneSliders');
+    if (host) host.innerHTML = '<div class="no-results">Lade Modell-Slider…</div>';
+    try {
+        const r = await fetch(`/api/elo-model-schema?model=${_elotuneModel}`);
+        if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+        _elotuneSchema = await r.json();
+    } catch (e) {
+        if (host) host.innerHTML = `<div class="no-results">
+            Schema-Endpoint fehlt (${e.message}).<br>
+            <small>serve.py einmal neu starten.</small>
+        </div>`;
+        return;
+    }
+    _elotuneState = {};
+    for (const s of _elotuneSchema.sliders) {
+        _elotuneState[s.key] = s.default;
+    }
+    _renderTuningSliders();
+}
+
+function _renderTuningSliders() {
+    const host = document.getElementById('elotuneSliders');
+    if (!host || !_elotuneSchema) return;
+    host.innerHTML = _elotuneSchema.sliders.map(s => `
+        <div class="elotune-slider">
+            <label>
+                <span>${_escapeHtml(s.label)}</span>
+                <span class="val" data-key="${s.key}">${_fmtVal(_elotuneState[s.key], s.fmt)}</span>
+            </label>
+            <input type="range" min="${s.min}" max="${s.max}" step="${s.step}"
+                   value="${_elotuneState[s.key]}" data-key="${s.key}">
+        </div>
+    `).join('');
+    host.querySelectorAll('input[type="range"]').forEach(inp => {
+        inp.addEventListener('input', () => {
+            const k = inp.dataset.key;
+            const v = parseFloat(inp.value);
+            _elotuneState[k] = v;
+            const spec = _elotuneSchema.sliders.find(s => s.key === k);
+            host.querySelector(`.val[data-key="${k}"]`).textContent = _fmtVal(v, spec.fmt);
+        });
+    });
+}
+
+function resetEloTuning() {
+    if (!_elotuneSchema) return;
+    for (const s of _elotuneSchema.sliders) {
+        _elotuneState[s.key] = s.default;
+    }
+    _renderTuningSliders();
+}
+
+async function runEloTuning() {
+    const btn = document.getElementById('elotuneRun');
+    const result = document.getElementById('elotuneResult');
+    const useOOS = document.getElementById('elotuneOOS')?.checked;
+    if (!btn || !result) return;
+    btn.disabled = true;
+    btn.textContent = 'Rechne …';
+    result.innerHTML = '<div class="no-results">Berechne ELO mit deinen Werten — kann 10-15s dauern …</div>';
+
+    const body = Object.assign({model: _elotuneModel}, _elotuneState);
+    if (useOOS) body.train_end_date = '2024-12-31';
+
+    const t0 = Date.now();
+    try {
+        const r = await fetch('/api/elo-recompute', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+        const data = await r.json();
+        _drawEloTuneResult(data, Date.now() - t0);
+    } catch (e) {
+        result.innerHTML = `<div class="no-results">
+            Fehler: ${_escapeHtml(e.message)}<br><br>
+            <small>Wenn der Endpoint 404 zurückgibt, muss <code>scripts/serve.py</code>
+            einmal neu gestartet werden (Strg+C → erneut starten).</small>
+        </div>`;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Berechne neu';
+    }
+}
+
+function _drawEloTuneResult(data, clientMs) {
+    const result = document.getElementById('elotuneResult');
+    if (!result) return;
+
+    const inAcc  = data.in_sample?.accuracy;
+    const oosAcc = data.oos?.accuracy;
+
+    let metaCards = `
+        <div><span class="stat-label">Spieler</span>
+            <span class="stat-val">${data.n_players.toLocaleString('de-DE')}</span></div>
+        <div><span class="stat-label">Matches</span>
+            <span class="stat-val">${data.n_matches.toLocaleString('de-DE')}</span></div>
+        <div><span class="stat-label">In-sample (DVV 25+)</span>
+            <span class="stat-val">${inAcc != null ? (inAcc*100).toFixed(1)+'%' : '–'}</span>
+            <small style="color:var(--text-dim)">${data.in_sample?.n || 0} matches</small></div>`;
+    if (data.oos) {
+        metaCards += `
+        <div><span class="stat-label">OOS (nach ${data.train_end_date})</span>
+            <span class="stat-val">${oosAcc != null ? (oosAcc*100).toFixed(1)+'%' : '–'}</span>
+            <small style="color:var(--text-dim)">${data.oos.n} matches</small></div>`;
+    }
+    metaCards += `
+        <div><span class="stat-label">Berechnung (Server)</span>
+            <span class="stat-val">${data.duration_s.toFixed(1)}s</span></div>`;
+
+    // Calibration table — prefer OOS when present, else in-sample
+    const calibSrc = data.oos?.calibration || data.in_sample?.calibration || [];
+    const calibLabel = data.oos ? `OOS Calibration` : `In-sample Calibration`;
+    const calibRows = calibSrc.filter(r => r.n > 0).map(r => `
+        <tr>
+            <td>[${r.bucket_lo.toFixed(1)}, ${(r.bucket_lo+0.1).toFixed(1)})</td>
+            <td>${r.n}</td>
+            <td>${(r.predicted*100).toFixed(0)}%</td>
+            <td>${r.actual != null ? (r.actual*100).toFixed(0)+'%' : '–'}</td>
+        </tr>
+    `).join('');
+    const calibTable = calibRows ? `
+        <h4 style="margin:0.5rem 0; color:var(--text-dim); font-size:0.85rem;">${calibLabel}</h4>
+        <table class="elotune-calib">
+            <thead><tr><th>Bucket</th><th>n</th><th>predicted</th><th>actual</th></tr></thead>
+            <tbody>${calibRows}</tbody>
+        </table>` : '';
+
+    // Top-30 players (M+W combined) for quick comparison vs the production list
+    const top = (data.players || []).slice(0, 30);
+    const rows = top.map((p, i) => `
+        <tr>
+            <td class="rank num">${i + 1}</td>
+            <td class="gender-cell">${p.gender === 'm' ? '♂' : p.gender === 'f' ? '♀' : ''}</td>
+            <td>${_escapeHtml(p.name)}</td>
+            <td class="country-cell">${_escapeHtml(p.country || '—')}</td>
+            <td class="num elo-cell">${Math.round(p.elo_combined || p.elo_individual)}</td>
+            <td class="num">${p.matches}</td>
+            <td class="num country-cell">${p.last_active || ''}</td>
+        </tr>
+    `).join('');
+
+    result.innerHTML = `
+        <div class="elotune-result-meta">${metaCards}</div>
+        ${calibTable}
+        <table class="elo-table">
+            <thead><tr>
+                <th class="num">#</th><th></th><th>Name</th><th>Land</th>
+                <th class="num">ELO</th><th class="num">M</th><th class="num">Zuletzt</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table>
+        <div class="elo-summary">Top 30 von ${(data.players || []).length} Spielern. Client-Roundtrip: ${(clientMs/1000).toFixed(1)}s</div>
+    `;
 }
 
 function switchToTab(tabId) {
@@ -3096,10 +3622,49 @@ initPlayerFilters();
 initBracketGenderToggle();
 
 // ── App start: bypass login when Supabase isn't configured (Self-Host) ──
-function _startApp() {
+function _startApp(session) {
     const lo = document.getElementById('loginOverlay');
     if (lo) lo.hidden = true;
+    window.USER_ROLE = _decodeRole(session);
+    applyRoleVisibility(window.USER_ROLE);
     loadData();
+}
+
+// Hide tabs / controls that the current role isn't allowed to access. Tabs are
+// tagged in index.html via `data-min-role`. Untagged tabs are visible to all.
+// If the currently-active tab gets hidden, fall back to the ELO ranking tab
+// (the one tab everyone can see).
+function applyRoleVisibility(role) {
+    const tabBtns = document.querySelectorAll('.tab[data-min-role]');
+    const tabIdMap = { players: 'playersTab', picks: 'picksTab',
+        compare: 'compareTab', bracket: 'bracketTab',
+        elo: 'eloTab', elotune: 'elotuneTab' };
+    let hidActive = false;
+    tabBtns.forEach(btn => {
+        const need = btn.getAttribute('data-min-role');
+        const allowed = roleAtLeast(role, need);
+        btn.hidden = !allowed;
+        // Derive content-pane id from the onclick="switchTab('X', this)" attr.
+        const m = (btn.getAttribute('onclick') || '').match(/switchTab\('([^']+)'/);
+        const contentId = m && tabIdMap[m[1]];
+        if (contentId) {
+            const pane = document.getElementById(contentId);
+            if (pane) {
+                if (!allowed && pane.classList.contains('active')) hidActive = true;
+                if (!allowed) pane.classList.remove('active');
+            }
+        }
+    });
+    // Buttons / controls outside the tab bar also key off data-min-role.
+    document.querySelectorAll('[data-min-role]').forEach(el => {
+        if (el.classList.contains('tab')) return;
+        el.hidden = !roleAtLeast(role, el.getAttribute('data-min-role'));
+    });
+    if (hidActive) {
+        const eloBtn = Array.from(document.querySelectorAll('.tab'))
+            .find(b => (b.getAttribute('onclick') || '').includes("switchTab('elo'"));
+        if (eloBtn && !eloBtn.hidden) switchTab('elo', eloBtn);
+    }
 }
 
 function _showLogin() {
@@ -3137,7 +3702,7 @@ if (!supa) {
     let _appStarted = false;
     supa.auth.onAuthStateChange((_event, session) => {
         if (session) {
-            if (!_appStarted) { _appStarted = true; _startApp(); }
+            if (!_appStarted) { _appStarted = true; _startApp(session); }
         } else {
             _appStarted = false;
             _showLogin();
@@ -3147,7 +3712,7 @@ if (!supa) {
     supa.auth.getSession().then(({ data }) => {
         if (data?.session) {
             _appStarted = true;
-            _startApp();
+            _startApp(data.session);
         } else {
             _showLogin();
         }

@@ -1,0 +1,30 @@
+# Files / directories excluded from the Cloud Build upload context.
+# Mirrors .gitignore intent for the deploy path.
+
+.git/
+.gitignore
+
+# Local-only machine state. The Cloud Run container mounts a GCS bucket at
+# /data via gcsfuse, so the local copy is irrelevant (and 300+ MB heavy).
+data/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# IDE / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local secrets (real values live in Secret Manager)
+.env
+.env.local
+firebase_auth.json
+
+# Plans / docs that don't need to ship in the image
+.claude/
+zusammenfassung.md

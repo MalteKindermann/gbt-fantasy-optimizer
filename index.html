@@ -102,10 +102,12 @@
         </div>
 
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('players', this)">📊 Alle Spieler</div>
-            <div class="tab"        onclick="switchTab('picks',   this)">🔒 Meine Picks</div>
-            <div class="tab"        onclick="switchTab('compare', this)">⚖ Vergleich der Teams</div>
-            <div class="tab"        onclick="switchTab('bracket', this)">🏆 Turnier-Baum</div>
+            <div class="tab active" data-min-role="admin"    onclick="switchTab('players', this)">📊 Alle Spieler</div>
+            <div class="tab"        data-min-role="admin"    onclick="switchTab('picks',   this)">🔒 Meine Picks</div>
+            <div class="tab"        data-min-role="admin"    onclick="switchTab('compare', this)">⚖ Vergleich der Teams</div>
+            <div class="tab"        data-min-role="admin"    onclick="switchTab('bracket', this)">🏆 Turnier-Baum</div>
+            <div class="tab"        onclick="switchTab('elo',     this)">🏅 ELO Rangliste</div>
+            <div class="tab"        data-min-role="elo_lab"  onclick="switchTab('elotune', this)">🔬 ELO Tuning</div>
         </div>
 
         <div id="picksTab" class="tab-content">
@@ -142,6 +144,89 @@
             </div>
             <div id="bracketView">
                 <div class="no-results">Lade Bracket-Vorhersage…</div>
+            </div>
+        </div>
+
+        <div id="eloTab" class="tab-content">
+            <p class="tab-hint">
+                Eigenständiges Rating-System auf Basis aller DVV-, FIVB- und bvbinfo-Spiele
+                seit 2015. Drei Modelle parallel: klassisches ELO, Glicko-2 (mit Unsicherheits-φ),
+                TrueSkill (Microsoft, faktor-graph für Teams).
+            </p>
+            <div class="elo-model-bar">
+                <label>Modell:</label>
+                <select id="eloModelSelect" class="elo-model-select">
+                    <option value="elo">ELO (klassisch)</option>
+                    <option value="glicko2">Glicko-2</option>
+                    <option value="trueskill">TrueSkill</option>
+                    <option value="ensemble">Ensemble (3-Modell-Mittel)</option>
+                </select>
+                <span id="eloModelStats" class="elo-model-stats"></span>
+                <button id="eloRefreshBtn" class="elo-refresh-btn" data-min-role="elo_lab"
+                        title="Prüft auf neue Matches/Turniere seit dem letzten Build (nur neue Daten werden gefetched, Rebuild nur wenn nötig)">
+                    🔄 Aktualisieren
+                </button>
+            </div>
+            <div id="eloRefreshBanner" class="elo-refresh-banner" hidden></div>
+            <div class="elo-controls">
+                <input type="search" id="eloSearch" class="elo-search"
+                       placeholder="🔍 Spieler suchen …" autocomplete="off">
+                <div class="elo-filter-group" id="eloCountryFilter">
+                    <button class="filter-pill active" data-country="all">Alle</button>
+                    <button class="filter-pill" data-country="germany">🇩🇪 Nur Deutschland</button>
+                    <button class="filter-pill" data-country="intl">International</button>
+                </div>
+                <div class="elo-filter-group" id="eloGenderFilter">
+                    <button class="filter-pill active" data-gender="all">M+W</button>
+                    <button class="filter-pill" data-gender="m">♂ Männer</button>
+                    <button class="filter-pill" data-gender="f">♀ Frauen</button>
+                </div>
+                <label class="elo-active-toggle">
+                    <input type="checkbox" id="eloActiveOnly" checked>
+                    Nur aktive Spieler (≥ 5 Matches, letzte 2 Jahre)
+                </label>
+            </div>
+            <div id="eloRanking">
+                <div class="no-results">Lade ELO-Daten…</div>
+            </div>
+        </div>
+
+        <div id="elotuneTab" class="tab-content">
+            <p class="tab-hint">
+                Spielwiese: Modell wählen, Regler ziehen, „Berechne neu" drücken und mit
+                der produktiven Rangliste im anderen Tab vergleichen. Überschreibt <em>nichts</em>.
+            </p>
+            <div class="elotune-controls">
+                <div class="elo-model-bar">
+                    <label>Modell:</label>
+                    <select id="elotuneModelSelect" class="elo-model-select">
+                        <option value="elo">ELO (klassisch)</option>
+                        <option value="glicko2">Glicko-2</option>
+                        <option value="trueskill">TrueSkill</option>
+                        <option value="ensemble">Ensemble (3-Modell-Mittel)</option>
+                    </select>
+                </div>
+                <div class="elotune-sliders" id="elotuneSliders">
+                    <div class="no-results">Lade Modell-Slider…</div>
+                </div>
+                <div class="elotune-actions">
+                    <button class="btn" id="elotuneRun" onclick="runEloTuning()">
+                        Berechne neu
+                    </button>
+                    <button class="btn-inline btn-inline-ghost" onclick="resetEloTuning()">
+                        Zurücksetzen
+                    </button>
+                    <label class="elo-active-toggle">
+                        <input type="checkbox" id="elotuneOOS">
+                        Out-of-sample Backtest (Train bis 2024-12-31)
+                    </label>
+                </div>
+            </div>
+            <div id="elotuneResult">
+                <div class="no-results">
+                    Klicke auf „Berechne neu", um eine ELO-Variante zu rechnen.
+                    Dauert ~10-15 Sekunden über alle 115k Matches.
+                </div>
             </div>
         </div>
 

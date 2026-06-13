@@ -67,6 +67,16 @@ _ensure_runtime_stubs()
 # Single-flight: never run two simulations at once
 _sim_lock = threading.Lock()
 
+# Single-flight + shared status for the smart ELO refresh
+_elo_refresh_lock = threading.Lock()
+_elo_refresh_status: dict = {
+    "phase": "idle",            # 'idle'|'discovering'|'fetching'|'checking'|'building'|'done'|'error'
+    "message": "",
+    "started_at": None,
+    "finished_at": None,
+    "summary": None,            # final smart_refresh() return value
+}
+
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 # Supabase JWT verification is opt-in via the SUPABASE_URL env-var.
@@ -92,6 +102,17 @@ if _AUTH_ENABLED:
 # Paths that never require auth — needed so the login screen can load itself.
 _PUBLIC_PREFIXES = ("/index.html", "/app.js", "/styles.css", "/config.js", "/favicon")
 
+# Role hierarchy. Higher number = more permissions. Unknown roles fall back to
+# `elo_viewer` (the safest default for an authenticated user with no claim).
+_ROLE_ORDER = {"elo_viewer": 0, "elo_lab": 1, "admin": 2}
+_DEFAULT_ROLE = "elo_viewer"
+
+
+def _role_at_least(have: str | None, need: str) -> bool:
+    if have is None:
+        return False
+    return _ROLE_ORDER.get(have, -1) >= _ROLE_ORDER[need]
+
 
 def _path_is_public(path: str) -> bool:
     p = path.split("?", 1)[0]
@@ -100,25 +121,40 @@ def _path_is_public(path: str) -> bool:
     return any(p == pfx or p.startswith(pfx) for pfx in _PUBLIC_PREFIXES)
 
 
-def _verify_bearer(auth_header: str) -> bool:
+def _extract_role(auth_header: str) -> str | None:
+    """Return the caller's role, or None for invalid/missing token.
+
+    Self-host mode (auth disabled) short-circuits to "admin" so every
+    `_require_role` check transparently passes."""
     if not _AUTH_ENABLED:
-        return True
+        return "admin"
     if not auth_header or not auth_header.lower().startswith("bearer "):
-        return False
+        return None
     token = auth_header.split(None, 1)[1].strip()
     try:
         signing_key = _jwks_client.get_signing_key_from_jwt(token)
-        # Algorithms list covers Supabase's actual choices: ES256 (new default,
-        # ECC P-256), RS256 (alternative), and HS256 (legacy fallback if a
-        # symmetric key ever appears in the JWKS).
-        _pyjwt.decode(
+        payload = _pyjwt.decode(
             token, signing_key.key,
             algorithms=["ES256", "RS256", "HS256"],
             audience="authenticated",
         )
-        return True
     except Exception:
-        return False
+        return None
+    raw = (payload.get("app_metadata") or {}).get("role")
+    return raw if raw in _ROLE_ORDER else _DEFAULT_ROLE
+
+
+# Min-role required to read each file under /data/. Most are admin-only; the
+# ELO snapshots are visible to anyone authenticated.
+_ELO_DATA_NEEDLES = ("elo_", "_current.json", "elo_models_meta", "elo_aliases")
+
+
+def _data_path_min_role(path: str) -> str:
+    p = path.split("?", 1)[0].lower()
+    name = p.rsplit("/", 1)[-1]
+    if any(n in name for n in _ELO_DATA_NEEDLES):
+        return "elo_viewer"
+    return "admin"
 
 
 def _read_sim() -> dict | None:
@@ -176,8 +212,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if not self._require_auth_or_401():
             return
         if self.path.startswith("/api/sim-status"):
+            if not self._require_role("admin"):
+                return
             self._send_json(200, sim_status())
             return
+
+        # ── List available rating models for the UI dropdown ──
+        if self.path.startswith("/api/elo-models"):
+            if not self._require_role("elo_viewer"):
+                return
+            try:
+                from elo import models as elo_models
+                self._send_json(200, {"models": elo_models.available_models()})
+            except Exception as e:
+                self._send_json(500, {"error": str(e)})
+            return
+
+        # ── ELO smart-refresh status (polled by the UI button) ──
+        if self.path.startswith("/api/elo-refresh-status"):
+            if not self._require_role("elo_viewer"):
+                return
+            self._send_json(200, dict(_elo_refresh_status))
+            return
+
+        # ── Slider schema per model for the tuning tab ──
+        if self.path.startswith("/api/elo-model-schema"):
+            if not self._require_role("elo_viewer"):
+                return
+            _, _, query = self.path.partition("?")
+            params = urllib.parse.parse_qs(query)
+            model_id = params.get("model", ["elo"])[0]
+            try:
+                from elo import models as elo_models
+                model = elo_models.make_model(model_id)
+                self._send_json(200, {
+                    "model": model_id,
+                    "name": model.name,
+                    "sliders": type(model).slider_spec(),
+                })
+            except Exception as e:
+                self._send_json(400, {"error": str(e)})
+            return
+
+        # Gate static file reads under /data/ by role.
+        p = self.path.split("?", 1)[0]
+        if p.startswith("/data/"):
+            if not self._require_role(_data_path_min_role(self.path)):
+                return
+
         # Files: prevent caching of the sim file so frontend always re-reads after API call
         if self.path.endswith("tournament_sim.json"):
             super().do_GET()
@@ -208,14 +290,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def _require_auth_or_401(self) -> bool:
-        """Return True if request is allowed to proceed. Sends 401 itself otherwise."""
-        if not _AUTH_ENABLED:
-            return True
+        """Return True if request is allowed to proceed. Sends 401 itself otherwise.
+
+        Stores the caller's role in `self.request_role` for downstream
+        `_require_role` checks. Self-host mode → "admin"."""
         if _path_is_public(self.path):
+            self.request_role = "admin"
             return True
-        if _verify_bearer(self.headers.get("Authorization", "")):
+        role = _extract_role(self.headers.get("Authorization", ""))
+        if role is None:
+            self._send_json(401, {"error": "auth required"})
+            return False
+        self.request_role = role
+        return True
+
+    def _require_role(self, min_role: str) -> bool:
+        """Return True if `self.request_role` meets `min_role`, else send 403."""
+        have = getattr(self, "request_role", None)
+        if _role_at_least(have, min_role):
             return True
-        self._send_json(401, {"error": "auth required"})
+        self._send_json(403, {
+            "error": "forbidden",
+            "role": have,
+            "required": min_role,
+        })
         return False
 
     def do_POST(self):
@@ -226,6 +324,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         # ── Bulk-update prices in players_available.json ──
         if path == "/api/set-prices":
+            if not self._require_role("admin"):
+                return
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -260,6 +360,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         # ── Swap one ambiguous player in players_available.json ──
         if path == "/api/swap-player":
+            if not self._require_role("admin"):
+                return
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -333,6 +435,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         # ── Force-refresh the Firestore snapshot + re-sync players_available ──
         if path == "/api/firestore-sync":
+            if not self._require_role("admin"):
+                return
             import firestore_sync
             from simulate_tournament import sync_players_available_from_brackets
 
@@ -374,8 +478,147 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             })
             return
 
+        # ── Recompute a rating model with custom hyperparameters (sandbox) ──
+        if path == "/api/elo-recompute":
+            if not self._require_role("elo_lab"):
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+            except Exception as e:
+                self._send_json(400, {"error": f"invalid body: {e}"})
+                return
+
+            try:
+                from elo import models as elo_models
+                from elo import runner as elo_runner
+                from elo import build_ratings as elo_build
+            except Exception as e:
+                self._send_json(500, {"error": f"elo modules not importable: {e}"})
+                return
+
+            model_id = body.pop("model", "elo")
+            train_end_date = body.pop("train_end_date", None) or None
+
+            try:
+                model = elo_models.make_model(model_id, body)
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self._send_json(400, {"error": f"bad config override: {e}"})
+                return
+
+            t0 = time.time()
+            try:
+                records = elo_build.get_consolidated_records()
+                run = elo_runner.run_model(records, model,
+                                           train_end_date=train_end_date)
+                players = elo_runner.build_player_export(run)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                self._send_json(500, {"error": str(e)})
+                return
+
+            in_acc = (run.in_sample_correct / run.in_sample_total
+                      if run.in_sample_total else None)
+            oos_acc = (run.oos_correct / run.oos_total
+                       if run.oos_total else None)
+            def _calib(b):
+                return [{"bucket_lo": k / 10, "n": len(v),
+                         "predicted": (k / 10) + 0.05,
+                         "actual": sum(v) / len(v) if v else None}
+                        for k, v in sorted(b.items())]
+
+            # Effective config: only export fields that exist on the model's cfg
+            cfg = getattr(model, "cfg", None)
+            cfg_dict = ({k: getattr(cfg, k)
+                         for k in cfg.__dataclass_fields__}
+                        if cfg is not None and hasattr(cfg, "__dataclass_fields__")
+                        else {})
+
+            self._send_json(200, {
+                "ok": True,
+                "model": model_id,
+                "config": cfg_dict,
+                "train_end_date": train_end_date,
+                "n_matches": len(records),
+                "n_players": len(players),
+                "in_sample": {
+                    "n": run.in_sample_total,
+                    "correct": run.in_sample_correct,
+                    "accuracy": in_acc,
+                    "calibration": _calib(run.in_sample_calib),
+                },
+                "oos": {
+                    "n": run.oos_total,
+                    "correct": run.oos_correct,
+                    "accuracy": oos_acc,
+                    "calibration": _calib(run.oos_calib),
+                } if train_end_date else None,
+                "duration_s": round(time.time() - t0, 2),
+                "players": players,
+            })
+            return
+
+        # ── Smart ELO refresh: fires background thread, returns 202 ──
+        if path == "/api/elo-refresh":
+            if not self._require_role("elo_lab"):
+                return
+            if not _elo_refresh_lock.acquire(blocking=False):
+                self._send_json(409, {
+                    "error": "refresh already running",
+                    "status": dict(_elo_refresh_status),
+                })
+                return
+            try:
+                from elo import refresh as elo_refresh
+            except Exception as e:
+                _elo_refresh_lock.release()
+                self._send_json(500, {"error": f"refresh module: {e}"})
+                return
+
+            def _status_cb(phase: str, message: str, extras: dict) -> None:
+                _elo_refresh_status["phase"] = phase
+                _elo_refresh_status["message"] = message
+
+            def _worker() -> None:
+                import datetime as _dt
+                _elo_refresh_status["phase"] = "discovering"
+                _elo_refresh_status["message"] = "starte…"
+                _elo_refresh_status["started_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+                _elo_refresh_status["finished_at"] = None
+                _elo_refresh_status["summary"] = None
+                try:
+                    result = elo_refresh.smart_refresh(_status_cb)
+                    _elo_refresh_status["summary"] = result
+                    if result.get("error"):
+                        _elo_refresh_status["phase"] = "error"
+                        _elo_refresh_status["message"] = result["error"]
+                    else:
+                        _elo_refresh_status["phase"] = "done"
+                except Exception as e:
+                    import traceback; traceback.print_exc()
+                    _elo_refresh_status["phase"] = "error"
+                    _elo_refresh_status["message"] = str(e)
+                finally:
+                    _elo_refresh_status["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
+                    _elo_refresh_lock.release()
+
+            threading.Thread(target=_worker, daemon=True).start()
+            self._send_json(202, {
+                "ok": True,
+                "status": dict(_elo_refresh_status),
+                "hint": "poll GET /api/elo-refresh-status until phase in {done,error}",
+            })
+            return
+
         if path != "/api/simulate":
             self._send_json(404, {"error": "not found"})
+            return
+
+        if not self._require_role("admin"):
             return
 
         gender = params.get("gender", ["m"])[0]
