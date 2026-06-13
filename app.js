@@ -979,7 +979,7 @@ async function renderEloRanking() {
     // Preload meta for the comparison line (best-effort)
     if (_eloMeta === null) {
         try {
-            const r = await fetch('data/elo_models_meta.json?t=' + Date.now());
+            const r = await apiFetch('data/elo_models_meta.json?t=' + Date.now());
             _eloMeta = r.ok ? await r.json() : { models: [] };
         } catch { _eloMeta = { models: [] }; }
         _updateEloModelStats();
@@ -987,7 +987,7 @@ async function renderEloRanking() {
     // Load the currently-selected model's player list (with cache per model)
     if (!_eloDataByModel[_eloCurrentModel]) {
         try {
-            const r = await fetch(`data/${_eloCurrentModel}_current.json?t=` + Date.now());
+            const r = await apiFetch(`data/${_eloCurrentModel}_current.json?t=` + Date.now());
             if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
             _eloDataByModel[_eloCurrentModel] = await r.json();
         } catch (e) {
@@ -1273,7 +1273,7 @@ async function _loadElotuneSchema() {
     const host = document.getElementById('elotuneSliders');
     if (host) host.innerHTML = '<div class="no-results">Lade Modell-Slider…</div>';
     try {
-        const r = await fetch(`/api/elo-model-schema?model=${_elotuneModel}`);
+        const r = await apiFetch(`/api/elo-model-schema?model=${_elotuneModel}`);
         if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
         _elotuneSchema = await r.json();
     } catch (e) {
@@ -1336,7 +1336,7 @@ async function runEloTuning() {
 
     const t0 = Date.now();
     try {
-        const r = await fetch('/api/elo-recompute', {
+        const r = await apiFetch('/api/elo-recompute', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body),
