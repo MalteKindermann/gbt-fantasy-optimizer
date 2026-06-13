@@ -1013,6 +1013,117 @@ async function renderEloRanking() {
 
 let _eloFiltersWired = false;
 
+// ── Info modal + model/slider explanations ──────────────────────────────────
+
+const MODEL_INFO = {
+    elo: {
+        title: 'ELO (klassisch)',
+        html: `
+            <p>Klassisches Elo nach Arpad Elo, erweitert um drei Beach-spezifische Anpassungen:</p>
+            <ul>
+                <li><strong>Margin-of-Victory:</strong> ein 21:5 zählt mehr als ein 21:19. Punkt-Differenz fließt als Multiplikator in das K ein.</li>
+                <li><strong>Importance-Weights:</strong> Quali-Spiele zählen weniger als Hauptrunde, Finals zählen extra.</li>
+                <li><strong>Blend Einzel/Team:</strong> Jeder Spieler hat ein eigenes Rating; das Team-Rating ist ein gewichteter Mix aus Einzel- und Team-historie. Junge Teams ohne Team-Historie verlassen sich mehr auf Einzel-Ratings.</li>
+            </ul>
+            <p>Out-of-Sample-Genauigkeit (Stand Juni 2026, n=5646): <strong>66,8 %</strong>, Calibration-Error 0,013.</p>
+        `,
+    },
+    glicko2: {
+        title: 'Glicko-2',
+        html: `
+            <p>Glickman's Erweiterung von Elo. Jeder Spieler hat zusätzlich zur Rating-Zahl ein <strong>φ (Unsicherheit)</strong> und ein <strong>σ (Volatilität)</strong>:</p>
+            <ul>
+                <li>φ wächst, wenn ein Spieler länger nicht spielt — sein Rating wird unzuverlässiger.</li>
+                <li>σ misst, wie sprunghaft das Skill-Level schwankt (verletzt? formstark? Anfänger?).</li>
+                <li>Updates werden in <strong>Rating-Periods</strong> verarbeitet (default 7 Tage). Innerhalb einer Period sammeln sich alle Spiele und werden gemeinsam Bayes-aktualisiert.</li>
+            </ul>
+            <p>Vorteil: bessere Kalibrierung als Elo, besonders bei seltenen Spielern. Nachteil: kein Margin-of-Victory (alle Spiele zählen gleich).</p>
+            <p>OOS-Genauigkeit: <strong>66,3 %</strong>, Calibration-Error 0,008 (besser kalibriert als Elo).</p>
+        `,
+    },
+    trueskill: {
+        title: 'TrueSkill (Microsoft Halo)',
+        html: `
+            <p>Faktor-Graph-Modell, ursprünglich für Halo Matchmaking entwickelt. Jeder Spieler hat ein <strong>μ (Skill-Schätzung)</strong> und ein <strong>σ (Unsicherheit)</strong>:</p>
+            <ul>
+                <li><strong>β</strong> (default 6.0 bei uns, Microsoft default 4.17) kontrolliert wie viel "Skill-Distance" einen sicheren Sieg ausmacht.</li>
+                <li><strong>τ</strong> (default 0.02) ist die zeitliche Drift — addiert pro Spiel etwas σ-Unsicherheit drauf, damit alte Ratings nicht für immer einfrieren.</li>
+                <li><strong>Team-Modell:</strong> Team-Rating = Summe der Spieler-μ (nicht Durchschnitt). 2v2 ist nativ unterstützt.</li>
+            </ul>
+            <p>OOS-Genauigkeit: <strong>66,8 %</strong>, Calibration-Error 0,032 (schlechter kalibriert, gleiche Accuracy wie Elo).</p>
+        `,
+    },
+    ensemble: {
+        title: 'Ensemble (1:1:1 Mittel)',
+        html: `
+            <p>Gewichtetes Mittel aus den drei einzelnen Modellen. Bei jedem Match werden alle drei Sub-Modelle parallel aktualisiert; für die Anzeige wird ein normalisiertes Rating auf der Elo-1500-Skala erzeugt.</p>
+            <p>Default-Gewicht 1:1:1 (jedes Modell zählt gleich). Vorteil: nutzt die unterschiedlichen Stärken — Elo's Margin-of-Victory, Glicko-2's Unsicherheit, TrueSkill's Team-Faktorisierung.</p>
+            <p>OOS-Genauigkeit: <strong>67,1 %</strong>, Calibration-Error <strong>0,007</strong> — beste Werte in beiden Metriken, schlägt jedes Einzelmodell.</p>
+            <p><em>Empfohlene Default-Auswahl.</em></p>
+        `,
+    },
+};
+
+const SLIDER_INFO = {
+    // Elo
+    k_base: 'Wie stark sich das Rating pro Match verändert. Größer = reaktiver, schwankender. Kleiner = stabiler, träger. Standard 30 (grid-tuned).',
+    blend_individual_weight: 'Anteil des Einzel-Spieler-Ratings im Team-Rating. Rest ist Team-Historie. 1.0 = nur Einzel, 0.5 = halb-halb. Standard 0.8 — Einzel-Skill ist meistens das stärkere Signal.',
+    decay_pull: 'Jährlicher Decay-Faktor: ungespielt-Spieler driften pro Jahr um diesen Anteil Richtung 1500 (Mittelmaß) zurück. 0.10 = 10 % pro Jahr.',
+    team_min_matches_for_blend: 'Erst ab so vielen Team-Matches wird die Team-Historie in den Blend reingezogen. Frische Teams = nur Einzel-Ratings nutzen.',
+    provisional_multiplier: 'Neue Spieler (< 10 Matches) bekommen einen K-Multiplikator. 2.0 = doppelt so reaktiv, damit unbekannte Skill-Levels schnell gefunden werden.',
+    importance_quali: 'Gewicht für Qualifikations-Spiele. < 1.0 = zählen weniger (oft niedrigeres Niveau, weniger Aussagekraft).',
+    importance_final: 'Gewicht für Final-Runden (HF/F). > 1.0 = zählen mehr (Top-Teams unter Druck — aussagekräftiger).',
+    mov_strength: 'Margin-of-Victory-Stärke: wie viel der Punktdifferenz im Match das K skaliert. 0 = MoV aus, 1.0 = voll. Standard 1.0.',
+    source_weight_dvv: 'Gewicht aller DVV-Matches (German Beach Tour). 1.0 = volles Gewicht.',
+    source_weight_fivb: 'Gewicht aller FIVB-Matches (World Tour, Olympia, World Championships). 1.0 = volles Gewicht.',
+    source_weight_bvb: 'Gewicht aller bvbinfo-Matches (AVP und alle anderen US- + internationale Touren). 1.0 = volles Gewicht.',
+    tier_weight_challenger: 'Innerhalb DVV: zusätzlicher Multiplikator für reine Challenger-Format-Turniere (kein Open-Niveau). Standard 0.5 = halbes Gewicht.',
+    tier_weight_qualifier: 'Innerhalb DVV: zusätzlicher Multiplikator für Qualifier-only-Turniere. Standard 0.3.',
+    // Glicko-2
+    initial_phi: 'Start-φ (Unsicherheit) für neue Spieler. Hoch = mehr Bewegung in den ersten Matches. Standard 200 (Original-Glicko: 350).',
+    initial_sigma: 'Start-σ (Volatilität). Wie sprunghaft sich das Skill-Level eines neuen Spielers ändern darf.',
+    tau: 'System-Volatilitäts-Constraint. Klein (0.3) = volatility ändert sich nur langsam; größer = reaktiver auf Ergebnis-Streuung.',
+    rating_period_days: 'Wie lange ein Rating-Period geht. Default 7 Tage: alle Matches einer Woche werden zusammen berechnet (= gemeinsame Bayes-Update).',
+    // TrueSkill
+    initial_mu: 'Start-μ (Skill-Schätzung) für neue Spieler. Standard 25 (Halo-Default).',
+    initial_sigma_ts: 'Start-σ (Unsicherheit). Standard 5.0 bei uns (Halo: 8.33) — Beach-Spieler kommen oft mit etwas Vorwissen.',
+    beta: 'Skill-Distance für sichere Siege. Höher = mehr Skill-Unterschied nötig für deterministisches Ergebnis. Standard 6.0.',
+    tau_ts: 'Zeit-Drift pro Match. Klein = Ratings frieren langsam ein; größer = altes Wissen verfällt schneller.',
+    draw_probability: 'Wahrscheinlichkeit für Unentschieden. Bei Beach ~0 (nur in Pool-Phase möglich).',
+    // Ensemble
+    weight_elo: 'Gewicht des Elo-Sub-Modells im finalen Mittel.',
+    weight_glicko2: 'Gewicht des Glicko-2-Sub-Modells im finalen Mittel.',
+    weight_trueskill: 'Gewicht des TrueSkill-Sub-Modells im finalen Mittel.',
+};
+
+function openInfoModal(title, html) {
+    const old = document.getElementById('infoModalBackdrop');
+    if (old) old.remove();
+    const bd = document.createElement('div');
+    bd.id = 'infoModalBackdrop';
+    bd.className = 'info-modal-backdrop';
+    bd.innerHTML = `
+        <div class="info-modal" onclick="event.stopPropagation()">
+            <button class="info-modal-close" onclick="document.getElementById('infoModalBackdrop').remove()" title="Schließen">×</button>
+            <h3>${title}</h3>
+            ${html}
+        </div>`;
+    bd.addEventListener('click', () => bd.remove());
+    bd.addEventListener('keydown', (e) => { if (e.key === 'Escape') bd.remove(); });
+    document.body.appendChild(bd);
+}
+
+function showModelInfo(modelId) {
+    const info = MODEL_INFO[modelId];
+    if (!info) return;
+    openInfoModal(info.title, info.html);
+}
+
+function showSliderInfo(key, label) {
+    const desc = SLIDER_INFO[key] || 'Keine Beschreibung hinterlegt.';
+    openInfoModal(label, `<p>${desc}</p><p><small>Slider-Key: <code>${key}</code></small></p>`);
+}
+
 // Show a "Daten X h alt — Neu berechnen" banner when elo_models_meta.json's
 // generated_at is older than 24h. Only visible for elo_lab+ (viewer can't act
 // on it). Doesn't touch #eloRefreshBanner (reserved for active-refresh state).
@@ -1092,19 +1203,28 @@ function _wireEloFilters() {
 // ── Smart ELO refresh: fires backend job + polls status ─────────────────────
 let _eloRefreshPolling = false;
 
-function _showEloRefreshBanner(text, kind) {
+function _showEloRefreshBanner(text, kind, withProgress = false) {
     const el = document.getElementById('eloRefreshBanner');
     if (!el) return;
     el.hidden = false;
     el.className = 'elo-refresh-banner' + (kind ? ' ' + kind : '');
-    el.textContent = text;
+    el.innerHTML = text + (withProgress ? '<div class="progress-indeterminate" style="margin:0.4rem 0 0 0"></div>' : '');
 }
 
 async function _eloTriggerRefresh() {
     if (_eloRefreshPolling) return;
+    const cloud = !!(window.API_BASE);
+    const dur = cloud
+        ? '<strong>Dauert in der Cloud mehrere Minuten</strong> '
+          + '(~6 min bei keinen neuen Matches, bis ~30 min für einen Full-Rebuild). '
+          + 'Du kannst die Seite verlassen — beim nächsten Besuch sind die Daten frisch.'
+        : 'Dauert lokal ~30 s, bei Full-Rebuild bis 10 min.';
+    if (!confirm('🔄 Update der ELO-Daten starten?\n\n' + dur.replace(/<[^>]+>/g, ''))) {
+        return;
+    }
     const btn = document.getElementById('eloRefreshBtn');
     if (btn) btn.disabled = true;
-    _showEloRefreshBanner('⏳ Starte Update-Check…', '');
+    _showEloRefreshBanner('⏳ Starte Update-Check… ' + dur, '', true);
     try {
         const r = await apiFetch('/api/elo-refresh', {method: 'POST'});
         if (!r.ok && r.status !== 202 && r.status !== 409) {
@@ -1157,8 +1277,12 @@ async function _eloPollRefresh() {
             discovering: '🔍', fetching: '⬇️',
             checking: '🔎', building: '🛠️',
         }[s.phase] || '⏳';
-        _showEloRefreshBanner(`${phaseEmoji} ${s.message || s.phase}…`, '');
-        setTimeout(_eloPollRefresh, 2000);
+        const elapsed = s.started_at
+            ? Math.floor((Date.now() - new Date(s.started_at).getTime()) / 1000)
+            : null;
+        const elapsedTxt = elapsed != null ? ` · ${elapsed}s` : '';
+        _showEloRefreshBanner(`${phaseEmoji} ${s.message || s.phase}…${elapsedTxt}`, '', true);
+        setTimeout(_eloPollRefresh, 3000);
     } catch (e) {
         _showEloRefreshBanner('⚠ Polling-Fehler: ' + e.message, 'error');
         _eloRefreshDone();
@@ -1323,7 +1447,10 @@ function _renderTuningSliders() {
         <div class="elotune-slider">
             <label>
                 <span>${_escapeHtml(s.label)}</span>
-                <span class="val" data-key="${s.key}">${_fmtVal(_elotuneState[s.key], s.fmt)}</span>
+                <button type="button" class="info-icon"
+                        onclick="showSliderInfo('${s.key}', ${JSON.stringify(s.label)})"
+                        title="Was macht dieser Regler?">i</button>
+                <span class="val" data-key="${s.key}" style="margin-left:auto">${_fmtVal(_elotuneState[s.key], s.fmt)}</span>
             </label>
             <input type="range" min="${s.min}" max="${s.max}" step="${s.step}"
                    value="${_elotuneState[s.key]}" data-key="${s.key}">
@@ -1355,12 +1482,31 @@ async function runEloTuning() {
     if (!btn || !result) return;
     btn.disabled = true;
     btn.textContent = 'Rechne …';
-    result.innerHTML = '<div class="no-results">Berechne ELO mit deinen Werten — kann 10-15s dauern …</div>';
+
+    const cloudMode = !!(window.API_BASE);
+    result.innerHTML = `
+        <div class="no-results" id="elotuneProgress">
+            ⏳ <strong>Rechne ELO über 117k Matches</strong> mit deinen Reglern …<br>
+            <div class="progress-indeterminate"></div>
+            <small>
+                ${cloudMode
+                    ? 'Cloud-Modus: kann <strong>mehrere Minuten</strong> dauern. Der Container '
+                      + 'muss ~150 MB Roh-HTMLs durch gcsfuse streamen, danach läuft die '
+                      + 'Konsolidierung in-memory. Du kannst die Seite zwischendurch verlassen — '
+                      + 'das Ergebnis erscheint hier, sobald die Antwort kommt.'
+                    : 'Lokal: ~10–15 Sekunden.'}
+                <br>Vergangen: <span id="elotuneElapsed">0</span> s
+            </small>
+        </div>`;
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+        const el = document.getElementById('elotuneElapsed');
+        if (el) el.textContent = Math.floor((Date.now() - t0) / 1000);
+    }, 1000);
 
     const body = Object.assign({model: _elotuneModel}, _elotuneState);
     if (useOOS) body.train_end_date = '2024-12-31';
 
-    const t0 = Date.now();
     try {
         const r = await apiFetch('/api/elo-recompute', {
             method: 'POST',
@@ -1374,9 +1520,11 @@ async function runEloTuning() {
         result.innerHTML = `<div class="no-results">
             Fehler: ${_escapeHtml(e.message)}<br><br>
             <small>Wenn der Endpoint 404 zurückgibt, muss <code>scripts/serve.py</code>
-            einmal neu gestartet werden (Strg+C → erneut starten).</small>
+            einmal neu gestartet werden (Strg+C → erneut starten). In der Cloud kann
+            ein Timeout auftreten, wenn der Service kalt startet — einmal warten + retry.</small>
         </div>`;
     } finally {
+        clearInterval(timer);
         btn.disabled = false;
         btn.textContent = 'Berechne neu';
     }

@@ -161,9 +161,10 @@
                     <option value="trueskill">TrueSkill</option>
                     <option value="ensemble">Ensemble (3-Modell-Mittel)</option>
                 </select>
+                <button type="button" class="info-icon" onclick="showModelInfo(document.getElementById('eloModelSelect').value)" title="Was rechnet dieses Modell?">i</button>
                 <span id="eloModelStats" class="elo-model-stats"></span>
                 <button id="eloRefreshBtn" class="elo-refresh-btn" data-min-role="elo_lab"
-                        title="Prüft auf neue Matches/Turniere seit dem letzten Build (nur neue Daten werden gefetched, Rebuild nur wenn nötig)">
+                        title="Prüft auf neue Matches/Turniere seit dem letzten Build. ⚠ In der Cloud dauert das mehrere Minuten (kein neuer Match: ~6 min; Full-Rebuild bei neuen Turnieren: bis ~30 min). Du kannst das Fenster zwischendurch verlassen.">
                     🔄 Aktualisieren
                 </button>
             </div>
@@ -195,7 +196,11 @@
         <div id="elotuneTab" class="tab-content">
             <p class="tab-hint">
                 Spielwiese: Modell wählen, Regler ziehen, „Berechne neu" drücken und mit
-                der produktiven Rangliste im anderen Tab vergleichen. Überschreibt <em>nichts</em>.
+                der produktiven Rangliste im anderen Tab vergleichen. Überschreibt <em>nichts</em>.<br>
+                <strong>⚠ Cloud-Wartezeit:</strong> Der erste Klick startet meist einen kalten Container —
+                rechne mit <strong>2–5 Minuten</strong>. Folge-Klicks im selben Container sind schneller (~30 s).
+                Klick auf das <span class="info-icon" style="margin:0;cursor:default">i</span>
+                neben einem Regler erklärt, was er macht.
             </p>
             <div class="elotune-controls">
                 <div class="elo-model-bar">
@@ -206,6 +211,7 @@
                         <option value="trueskill">TrueSkill</option>
                         <option value="ensemble">Ensemble (3-Modell-Mittel)</option>
                     </select>
+                    <button type="button" class="info-icon" onclick="showModelInfo(document.getElementById('elotuneModelSelect').value)" title="Was rechnet dieses Modell?">i</button>
                 </div>
                 <div class="elotune-sliders" id="elotuneSliders">
                     <div class="no-results">Lade Modell-Slider…</div>
@@ -225,8 +231,11 @@
             </div>
             <div id="elotuneResult">
                 <div class="no-results">
-                    Klicke auf „Berechne neu", um eine ELO-Variante zu rechnen.
-                    Dauert ~10-15 Sekunden über alle 115k Matches.
+                    Klicke auf „Berechne neu", um eine ELO-Variante über alle 117k Matches zu rechnen.<br>
+                    <strong>Lokal:</strong> ~10–15 Sekunden.
+                    <strong>In der Cloud:</strong> mehrere Minuten — der erste Slider-Klick startet den
+                    Container kalt (Gcsfuse muss ~150 MB Roh-HTMLs laden).
+                    Folge-Klicks im selben Container sind danach schneller.
                 </div>
             </div>
         </div>
