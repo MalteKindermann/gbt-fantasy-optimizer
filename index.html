@@ -161,7 +161,7 @@
                     <option value="trueskill">TrueSkill</option>
                     <option value="ensemble">Ensemble (3-Modell-Mittel)</option>
                 </select>
-                <button type="button" class="info-icon" onclick="showModelInfo(document.getElementById('eloModelSelect').value)" title="Was rechnet dieses Modell?">i</button>
+                <button type="button" class="info-icon" onclick="showModelInfo(document.getElementById('eloModelSelect').value, 'simple')" title="Was rechnet dieses Modell?">i</button>
                 <span id="eloModelStats" class="elo-model-stats"></span>
                 <button id="eloRefreshBtn" class="elo-refresh-btn" data-min-role="elo_lab"
                         title="Prüft auf neue Matches/Turniere seit dem letzten Build. ⚠ In der Cloud dauert das mehrere Minuten (kein neuer Match: ~6 min; Full-Rebuild bei neuen Turnieren: bis ~30 min). Du kannst das Fenster zwischendurch verlassen.">
@@ -211,7 +211,7 @@
                         <option value="trueskill">TrueSkill</option>
                         <option value="ensemble">Ensemble (3-Modell-Mittel)</option>
                     </select>
-                    <button type="button" class="info-icon" onclick="showModelInfo(document.getElementById('elotuneModelSelect').value)" title="Was rechnet dieses Modell?">i</button>
+                    <button type="button" class="info-icon" onclick="showModelInfo(document.getElementById('elotuneModelSelect').value, 'tech')" title="Was rechnet dieses Modell? (technische Details)">i</button>
                 </div>
                 <div class="elotune-sliders" id="elotuneSliders">
                     <div class="no-results">Lade Modell-Slider…</div>

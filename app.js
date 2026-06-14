@@ -1018,51 +1018,86 @@ let _eloFiltersWired = false;
 const MODEL_INFO = {
     elo: {
         title: 'ELO (klassisch)',
-        html: `
-            <p>Klassisches Elo nach Arpad Elo, erweitert um drei Beach-spezifische Anpassungen:</p>
+        simple: `
+            <p>Das berühmteste Rating-System der Welt — ursprünglich für Schach (1960er), heute überall: FIFA, Chess.com, sogar Tinder.</p>
+            <p><strong>Grundidee:</strong> Jeder Spieler hat eine Zahl (typisch um 1500). Bei einem Sieg gegen einen stärkeren Gegner steigt die Zahl deutlich, bei einem Sieg gegen einen schwächeren nur leicht. Bei einer Niederlage umgekehrt.</p>
+            <p>Wir haben dem System ein paar Beach-spezifische Anpassungen verpasst: ein deutlicher Sieg (21:5) zählt mehr als ein knapper (21:19), Finale wiegen schwerer als Qualifikations-Spiele, und neue Teams nutzen die Stärke ihrer Einzelspieler bis sie selbst genug Historie haben.</p>
+            <p><strong>Wie genau?</strong> Sagt 66,8 % aller bisher ungesehenen Matches richtig vorher.</p>
+        `,
+        tech: `
+            <p>Klassisches Elo nach Arpad Elo, mit Beach-spezifischen Erweiterungen:</p>
             <ul>
-                <li><strong>Margin-of-Victory:</strong> ein 21:5 zählt mehr als ein 21:19. Punkt-Differenz fließt als Multiplikator in das K ein.</li>
-                <li><strong>Importance-Weights:</strong> Quali-Spiele zählen weniger als Hauptrunde, Finals zählen extra.</li>
-                <li><strong>Blend Einzel/Team:</strong> Jeder Spieler hat ein eigenes Rating; das Team-Rating ist ein gewichteter Mix aus Einzel- und Team-historie. Junge Teams ohne Team-Historie verlassen sich mehr auf Einzel-Ratings.</li>
+                <li><strong>Margin-of-Victory:</strong> Set-Score-Differenz als K-Multiplikator (Stärke einstellbar via <code>mov_strength</code>).</li>
+                <li><strong>Importance-Weights:</strong> Quali / Hauptrunde / Finals haben unterschiedliche Multiplikatoren (<code>importance_quali</code>, <code>importance_final</code>).</li>
+                <li><strong>Source-Weights:</strong> DVV / FIVB / bvbinfo getrennt gewichtbar (<code>source_weight_*</code>).</li>
+                <li><strong>Tier-Weights:</strong> Innerhalb DVV können Challenger / Qualifier-only-Turniere herunter-gewichtet werden.</li>
+                <li><strong>Blend Einzel/Team:</strong> Team-Rating = <code>blend_individual_weight</code> · μ(Einzel) + (1−w) · μ(Team-Historie). Team-Blend erst ab <code>team_min_matches_for_blend</code>.</li>
+                <li><strong>Provisional-K:</strong> Spieler &lt; 10 Matches bekommen K × <code>provisional_multiplier</code>.</li>
+                <li><strong>Decay:</strong> Pro Jahr Inaktivität wird das Rating mit Faktor <code>decay_pull</code> Richtung 1500 gezogen.</li>
             </ul>
-            <p>Out-of-Sample-Genauigkeit (Stand Juni 2026, n=5646): <strong>66,8 %</strong>, Calibration-Error 0,013.</p>
+            <p>Persistiert Match-Predictions + History in <code>data/elo_ratings.db</code> (SQLite). OOS (n=5646, Train ≤2024-12-31): <strong>Accuracy 66,8 %</strong>, Calibration-Error 0,013. Grid-tuned defaults: <code>k_base=30, blend=0.8</code>.</p>
         `,
     },
     glicko2: {
         title: 'Glicko-2',
-        html: `
-            <p>Glickman's Erweiterung von Elo. Jeder Spieler hat zusätzlich zur Rating-Zahl ein <strong>φ (Unsicherheit)</strong> und ein <strong>σ (Volatilität)</strong>:</p>
+        simple: `
+            <p>Elo's klügerer Cousin (Mark Glickman, 2013). Das System merkt sich nicht nur, <strong>wie gut</strong> jemand ist, sondern auch <strong>wie sicher es sich da ist</strong>.</p>
+            <p>Wenn jemand lange nicht gespielt hat, sagt das System "ich weiß gerade nicht so genau wo er steht" und reagiert dann stärker auf das nächste Spiel. Zusätzlich erkennt es, ob jemand gerade stabil spielt (Routinier) oder sprunghaft (junges Talent, formschwacher Star).</p>
+            <p>Bei knappen Vorhersagen — z.B. wenn unklar ist, ob jemand 60 % oder 70 % Chance hat — ist Glicko-2 ehrlicher als Elo. Es behauptet seltener Sicherheit, wo keine ist.</p>
+            <p><strong>Wie genau?</strong> 66,3 % korrekte Vorhersagen, dafür mit Abstand bester Kalibrierungsfehler (0,008) — die berechneten Wahrscheinlichkeiten stimmen.</p>
+        `,
+        tech: `
+            <p>Glicko-2 nach Glickman (2013). Erweitert Elo um zwei Bayes-Größen pro Spieler:</p>
             <ul>
-                <li>φ wächst, wenn ein Spieler länger nicht spielt — sein Rating wird unzuverlässiger.</li>
-                <li>σ misst, wie sprunghaft das Skill-Level schwankt (verletzt? formstark? Anfänger?).</li>
-                <li>Updates werden in <strong>Rating-Periods</strong> verarbeitet (default 7 Tage). Innerhalb einer Period sammeln sich alle Spiele und werden gemeinsam Bayes-aktualisiert.</li>
+                <li><strong>φ (Rating Deviation):</strong> Unsicherheits-Maß. Wächst bei Inaktivität, schrumpft bei jedem Match. Start <code>initial_phi=200</code> (Original: 350; wir starten mit niedrigerem φ weil DVV-Priors angewendet werden).</li>
+                <li><strong>σ (Volatility):</strong> Wie sprunghaft sich das Skill-Level ändern darf. Constraint via <code>tau</code> (Original 0.5, wir: 0.3 für stabilere Ratings).</li>
+                <li><strong>Rating Periods:</strong> Matches innerhalb eines <code>rating_period_days</code>-Fensters werden als ein Bayes-Update verarbeitet — verbessert die Schätzung bei mehreren Spielen am gleichen Tag.</li>
+                <li><strong>Team-Rating:</strong> μ-Mittel der Einzel-Spieler; φ ist die quadrierte Summe (Var = Σ var_i).</li>
             </ul>
-            <p>Vorteil: bessere Kalibrierung als Elo, besonders bei seltenen Spielern. Nachteil: kein Margin-of-Victory (alle Spiele zählen gleich).</p>
-            <p>OOS-Genauigkeit: <strong>66,3 %</strong>, Calibration-Error 0,008 (besser kalibriert als Elo).</p>
+            <p>Konvertierung Glicko-2 ↔ Elo-Scale: <code>μ_g2 × 173.7178 + 1500</code>. Kein MoV-Term implementiert. OOS: <strong>Accuracy 66,3 %, CE 0,008</strong> — bestes Einzelmodell nach Kalibrierung.</p>
         `,
     },
     trueskill: {
         title: 'TrueSkill (Microsoft Halo)',
-        html: `
-            <p>Faktor-Graph-Modell, ursprünglich für Halo Matchmaking entwickelt. Jeder Spieler hat ein <strong>μ (Skill-Schätzung)</strong> und ein <strong>σ (Unsicherheit)</strong>:</p>
+        simple: `
+            <p>Microsoft hat TrueSkill für Xbox Live entwickelt, ursprünglich für Halo: 4-vs-4-Matchmaking auf Sekunden-Basis. Das System ist also auf <strong>Team-Spiele und Matchmaking</strong> ausgelegt — passt perfekt für Beach (2 vs 2).</p>
+            <p>Wie Glicko-2 kennt es nicht nur die Stärke, sondern auch die Unsicherheit. Außerdem behandelt es das Team als Ganzes (statt nur die einzelnen Spieler) und liefert direkt eine Antwort auf "wie wahrscheinlich gewinnt Team A".</p>
+            <p>Bei uns liefert es die <strong>höchste Accuracy</strong> (gemeinsam mit Elo: 66,8 %), ist aber etwas zu "selbstbewusst" — sagt manchmal 80 % wo nur 70 % gerechtfertigt wären. Trotzdem wertvoll als Komponente im Ensemble.</p>
+        `,
+        tech: `
+            <p>TrueSkill (Herbrich/Minka/Graepel 2007), Implementierung via <code>trueskill</code> PyPI-Package. Faktor-Graph mit Gauß-Belief-Propagation.</p>
             <ul>
-                <li><strong>β</strong> (default 6.0 bei uns, Microsoft default 4.17) kontrolliert wie viel "Skill-Distance" einen sicheren Sieg ausmacht.</li>
-                <li><strong>τ</strong> (default 0.02) ist die zeitliche Drift — addiert pro Spiel etwas σ-Unsicherheit drauf, damit alte Ratings nicht für immer einfrieren.</li>
-                <li><strong>Team-Modell:</strong> Team-Rating = Summe der Spieler-μ (nicht Durchschnitt). 2v2 ist nativ unterstützt.</li>
+                <li><strong>μ (Skill-Schätzung):</strong> Mittel der Skill-Posterior. Start <code>initial_mu=25</code>, "exposed Skill" = μ − 3σ (= 99,7 %-Konfidenz-Untergrenze).</li>
+                <li><strong>σ (Skill-Unsicherheit):</strong> Std. Start <code>initial_sigma_ts=5.0</code> bei uns (Halo: 8.33 = μ/3) — wir starten enger, weil DVV-Priors injiziert werden.</li>
+                <li><strong>β:</strong> Performance-Variance. Default 6.0 bei uns (Halo: μ/6 ≈ 4.17). Größeres β = weniger Skill-Distance nötig für deterministisches Ergebnis.</li>
+                <li><strong>τ:</strong> Pro-Match σ-Drift. Default 0.02 (Halo: 0.083 ≈ μ/300) — wir sind stabiler weil Beach langsamere Skill-Dynamik hat als Shooter.</li>
+                <li><strong>Team-Rating:</strong> Summe der Spieler-μ (NICHT Mittel). 2v2 nativ — Spieler-Updates fallen aus dem TrueSkill-Solver direkt raus.</li>
             </ul>
-            <p>OOS-Genauigkeit: <strong>66,8 %</strong>, Calibration-Error 0,032 (schlechter kalibriert, gleiche Accuracy wie Elo).</p>
+            <p>Display-Skala normalisiert über <code>display_offset()</code> auf Elo-1500. Kein MoV. OOS: <strong>Accuracy 66,8 %, CE 0,032</strong>.</p>
         `,
     },
     ensemble: {
         title: 'Ensemble (1:1:1 Mittel)',
-        html: `
-            <p>Gewichtetes Mittel aus den drei einzelnen Modellen. Bei jedem Match werden alle drei Sub-Modelle parallel aktualisiert; für die Anzeige wird ein normalisiertes Rating auf der Elo-1500-Skala erzeugt.</p>
-            <p>Default-Gewicht 1:1:1 (jedes Modell zählt gleich). Vorteil: nutzt die unterschiedlichen Stärken — Elo's Margin-of-Victory, Glicko-2's Unsicherheit, TrueSkill's Team-Faktorisierung.</p>
-            <p>OOS-Genauigkeit: <strong>67,1 %</strong>, Calibration-Error <strong>0,007</strong> — beste Werte in beiden Metriken, schlägt jedes Einzelmodell.</p>
-            <p><em>Empfohlene Default-Auswahl.</em></p>
+        simple: `
+            <p>Warum sich für ein Modell entscheiden, wenn man alle drei nutzen kann?</p>
+            <p>Bei jedem Match werden parallel alle drei Modelle aktualisiert (ELO + Glicko-2 + TrueSkill). Die endgültige Vorhersage ist der Durchschnitt der drei. Wenn alle drei zustimmen ("70 % Sieg") ist das ein starkes Signal. Wenn zwei sagen 60 % und einer 80 %, glätten wir das auf einen vernünftigen Mittelwert.</p>
+            <p>Resultat: <strong>67,1 % Accuracy</strong> (besser als jedes Einzelmodell) und gleichzeitig <strong>der niedrigste Kalibrierungsfehler</strong>. Das beste Modell für die Rangliste.</p>
+            <p><em>Standardauswahl — wenn du nicht extra vergleichen willst, bleib hier.</em></p>
+        `,
+        tech: `
+            <p>Holds three child models internally, predicts as weighted Mittel:</p>
+            <ul>
+                <li><code>weight_elo</code> · P_elo + <code>weight_glicko2</code> · P_glicko2 + <code>weight_trueskill</code> · P_trueskill (Standard 1:1:1).</li>
+                <li>Display-Ratings normalisiert über <code>_normalise_to_elo</code> auf die 1500-Skala.</li>
+                <li>State-Dicts (<code>state_indiv</code>, <code>state_team</code>) sind plain attribute dicts mit key-only mirrors — werden incrementell pro Match aktualisiert, NIEMALS on-access re-derived (würde O(N²) im Runner verursachen, 1h+ build-hang).</li>
+                <li>Per-match <code>pre_team</code>-Aggregation ruft <code>display_offset()</code> jedes Sub-Modells auf → in heißen Loops potenziell teuer (TrueSkill instanziiert dabei ein Rating-Objekt).</li>
+            </ul>
+            <p>Kein eigenes K oder φ — Gewichte sind die einzigen tunable Hyperparameter. OOS: <strong>Accuracy 67,1 %, CE 0,007</strong> — beide Metriken bestes Resultat im Vergleich, schlägt jedes Einzelmodell.</p>
         `,
     },
 };
+
+const MODEL_INFO_MODES = ['simple', 'tech'];
 
 const SLIDER_INFO = {
     // Elo
@@ -1113,15 +1148,19 @@ function openInfoModal(title, html) {
     document.body.appendChild(bd);
 }
 
-function showModelInfo(modelId) {
+function showModelInfo(modelId, mode = 'simple') {
     const info = MODEL_INFO[modelId];
     if (!info) return;
-    openInfoModal(info.title, info.html);
+    const body = info[mode] || info.simple;
+    openInfoModal(info.title, body);
 }
 
-function showSliderInfo(key, label) {
+function showSliderInfo(key) {
+    const spec = (_elotuneSchema?.sliders || []).find(s => s.key === key);
+    const label = spec?.label || key;
     const desc = SLIDER_INFO[key] || 'Keine Beschreibung hinterlegt.';
-    openInfoModal(label, `<p>${desc}</p><p><small>Slider-Key: <code>${key}</code></small></p>`);
+    const range = spec ? `<p><small>Bereich: <code>${spec.min}</code> – <code>${spec.max}</code> · Default: <code>${spec.default}</code></small></p>` : '';
+    openInfoModal(label, `<p>${desc}</p>${range}<p><small>Slider-Key: <code>${key}</code></small></p>`);
 }
 
 // Show a "Daten X h alt — Neu berechnen" banner when elo_models_meta.json's
@@ -1448,7 +1487,7 @@ function _renderTuningSliders() {
             <label>
                 <span>${_escapeHtml(s.label)}</span>
                 <button type="button" class="info-icon"
-                        onclick="showSliderInfo('${s.key}', ${JSON.stringify(s.label)})"
+                        onclick="showSliderInfo('${s.key}')"
                         title="Was macht dieser Regler?">i</button>
                 <span class="val" data-key="${s.key}" style="margin-left:auto">${_fmtVal(_elotuneState[s.key], s.fmt)}</span>
             </label>
