@@ -133,9 +133,21 @@
                     <button class="filter-pill active" data-bg="m">♂ Männer</button>
                     <button class="filter-pill" data-bg="f">♀ Frauen</button>
                 </div>
-                <label class="manual-toggle-label">
-                    <input type="checkbox" id="manualModeToggle" onchange="toggleManualMode(this.checked)">
-                    ✏ Manuell anpassen
+                <label class="bracket-tree-label">Baum:
+                    <select id="bracketTreeSelect" class="elo-model-select" onchange="setBracketTree(this.value)">
+                        <option value="current">🎯 Aktuell</option>
+                        <option value="dvv">📊 DVV-Punkte</option>
+                        <option value="elo">🏅 ELO</option>
+                        <option value="personal">✏ Persönlich</option>
+                    </select>
+                </label>
+                <label class="bracket-tree-label" id="bracketEloModelLabel" style="display:none">Modell:
+                    <select id="bracketEloModelSelect" class="elo-model-select" onchange="setEloTreeModel(this.value)">
+                        <option value="elo">ELO (klassisch)</option>
+                        <option value="glicko2">Glicko-2</option>
+                        <option value="trueskill">TrueSkill</option>
+                        <option value="ensemble">Ensemble</option>
+                    </select>
                 </label>
                 <button class="btn-inline btn-inline-ghost" onclick="clearManualOverrides()"
                         id="clearManualBtn" style="display:none; font-size:0.8rem; padding:0.3rem 0.75rem">

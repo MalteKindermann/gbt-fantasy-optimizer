@@ -2152,6 +2152,59 @@ input:focus, select:focus {
 }
 .cmp-col-manual .cmp-title { color: var(--warning); }
 
+/* Compare panel drag-to-reorder + hide */
+.cmp-col { transition: box-shadow 0.12s, opacity 0.12s; }
+.cmp-col[draggable="true"]:active { opacity: 0.85; }
+.cmp-head-top {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+.cmp-head-top .cmp-title { flex: 1; min-width: 0; }
+.cmp-drag-handle {
+    cursor: grab;
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    line-height: 1;
+    user-select: none;
+    letter-spacing: -2px;
+}
+.cmp-col[draggable="true"] { cursor: grab; }
+.cmp-hide-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 0.85rem;
+    line-height: 1;
+    padding: 0.15rem 0.35rem;
+    border-radius: 4px;
+}
+.cmp-hide-btn:hover { color: var(--danger, #ff5c5c); background: rgba(255,255,255,0.06); }
+.cmp-hidden-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-bottom: 0.9rem;
+}
+.cmp-hidden-label { color: var(--text-dim); font-size: 0.8rem; }
+.cmp-hidden-chip {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 0.2rem 0.7rem;
+    font-size: 0.78rem;
+    cursor: pointer;
+}
+.cmp-hidden-chip:hover { border-color: var(--accent); }
+/* Tree-prognosis panel accent */
+.cmp-col-prog { border-color: rgba(90,170,255,0.35); }
+.bracket-tree-label { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--text-dim); font-size: 0.85rem; }
+.br-elo-mark    { background: rgba(90,170,255,0.18); }
+.br-played-mark { background: rgba(80,220,140,0.18); }
+
 /* Estimated stats badge on player cards and compare rows */
 .player-estimated-badge {
     display: inline-block;

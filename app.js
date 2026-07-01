@@ -1663,9 +1663,38 @@ function updatePicksHint() {
 // ── Bracket prediction view ───────────────────────────────────────────────────
 
 let bracketGender = 'm';
+let bracketTree = localStorage.getItem('bracketTree') || 'current';
+let _bracketDisplayByNum = {};   // match-num → displayed (tree-derived) match, for the detail modal
+
+// Switch the displayed prediction tree. "personal" enables click-to-edit.
+function setBracketTree(tree) {
+    bracketTree = tree;
+    localStorage.setItem('bracketTree', tree);
+    manualMode = (tree === 'personal');
+    const modelLbl = document.getElementById('bracketEloModelLabel');
+    if (modelLbl) modelLbl.style.display = (tree === 'elo') ? '' : 'none';
+    if (tree === 'elo' && !(_eloTreeIndexModel === _eloTreeModel && _eloTreeIndex)) {
+        ensureEloTreeData().finally(() => renderBracket());
+        return;
+    }
+    renderBracket();
+}
+function setEloTreeModel(model) {
+    _eloTreeModel = model;
+    localStorage.setItem('eloTreeModel', model);
+    ensureEloTreeData().finally(() => renderBracket());
+}
 
 function renderBracket() {
     const view = document.getElementById('bracketView');
+    // Keep the selector controls in sync with state.
+    const treeSel = document.getElementById('bracketTreeSelect');
+    if (treeSel) treeSel.value = bracketTree;
+    const modelSel = document.getElementById('bracketEloModelSelect');
+    if (modelSel) modelSel.value = _eloTreeModel;
+    const modelLbl = document.getElementById('bracketEloModelLabel');
+    if (modelLbl) modelLbl.style.display = (bracketTree === 'elo') ? '' : 'none';
+
     if (!tournamentSim || !tournamentSim.byGender) {
         const banner = document.getElementById('simBanner');
         const loading = banner && banner.dataset.mode === 'loading';
@@ -1679,13 +1708,22 @@ function renderBracket() {
         view.innerHTML = `<div class="no-results">Keine Bracket-Vorhersage für ${bracketGender === 'm' ? 'Männer' : 'Frauen'}.</div>`;
         return;
     }
+    if (bracketTree === 'elo' && !(_eloTreeIndexModel === _eloTreeModel && _eloTreeIndex)) {
+        view.innerHTML = '<div class="no-results"><span class="sim-spinner"></span> ELO-Daten werden geladen…</div>';
+        ensureEloTreeData().finally(() => renderBracket());
+        return;
+    }
 
-    const matches  = block.bracketPrediction;
-    const overrides = getManualOverrides();
-    const hasOverrides = Object.keys(overrides).length > 0;
-    const derived  = manualMode ? deriveManualBracket(matches, overrides) : null;
+    // Re-derive the bracket for the selected tree (played matches stay locked).
+    const treeMap = deriveTreeBracket(bracketGender, bracketTree, _eloTreeIndex) || {};
+    const isPersonal = (bracketTree === 'personal');
+    manualMode = isPersonal;
+    const matches  = block.bracketPrediction.map(bm => treeMap[bm.match]).filter(Boolean);
+    const hasOverrides = isPersonal && Object.keys(getManualOverrides()).length > 0;
     const byNum    = Object.fromEntries(matches.map(m => [m.match, m]));
-    const meta     = `${block.tournamentName ?? '?'} · Status: ${block.bracketStatus ?? '?'}`;
+    _bracketDisplayByNum = byNum;
+    const treeName = TREE_LABELS[bracketTree] ?? bracketTree;
+    const meta     = `${block.tournamentName ?? '?'} · Status: ${block.bracketStatus ?? '?'} · Baum: ${treeName}`;
 
     // GBT 8-team double-elim layout — uses an 8-row grid per column.
     // start/end are inclusive grid lines (1..9).
@@ -1734,7 +1772,9 @@ function renderBracket() {
         const cards = col.entries.map(e => {
             const m = byNum[e.num];
             if (!m) return '';
-            const dm = derived ? derived[e.num] : null;
+            // In personal mode pass the derived match so the ✏ override badge +
+            // click-to-edit affordances light up; other trees render m directly.
+            const dm = isPersonal ? m : null;
             return matchCard(m, e.start, e.end, e.finale === true, dm);
         }).join('');
         return `
@@ -1746,9 +1786,10 @@ function renderBracket() {
 
     const manualHint = manualMode
         ? `<p class="tab-hint br-manual-hint">
-               ✏ Manueller Modus — klicke auf einen Teamnamen um den Sieger dieses Spiels zu überschreiben.
+               ✏ Persönlicher Baum — klicke auf einen Teamnamen um den Sieger dieses Spiels zu überschreiben.
                Nochmals klicken hebt die Überschreibung auf.
-               Die Anpassungen fließen als Algorithmus <strong>Turnier-Manuell</strong> in den Vergleichstab ein.
+               Die Anpassungen fließen als <strong>Turnier-Prognose (Persönlich)</strong> und
+               <strong>Finale-Fokus (Persönlich)</strong> in den Vergleichstab ein.
            </p>`
         : `<p class="tab-hint">
                <strong>Bold</strong> = vorhergesagter Sieger ·
@@ -1786,6 +1827,8 @@ function matchCard(m, rowStart, rowEnd, isFinale, dm) {
     if (!manualMode && m.reason === 'h2h_ind') badges.push('<span class="br-h2h-mark br-ind-mark" title="Einzel-H2H-Bilanz">👤</span>');
     if (!manualMode && m.reason === 'close')   badges.push('<span class="br-h2h-mark br-close-mark" title="Knapp">~</span>');
     if (!manualMode && m.reason === 'seeding') badges.push('<span class="br-h2h-mark br-seed-mark" title="Setzliste geschätzt">📌</span>');
+    if (!manualMode && m.reason === 'elo')     badges.push('<span class="br-h2h-mark br-elo-mark" title="ELO-Rating">🏅</span>');
+    if (!manualMode && m.reason === 'played')  badges.push('<span class="br-h2h-mark br-played-mark" title="Gespielt">✅</span>');
     if (dm?.overridden)  badges.push('<span class="br-h2h-mark br-manual-mark" title="Manuell überschrieben">✏</span>');
     const badgesHtml = badges.join(' ');
 
@@ -1834,7 +1877,10 @@ function setBracketGender(g) {
 
 function openMatchDetail(matchNum) {
     const block = tournamentSim?.byGender?.[bracketGender];
-    const m = block?.bracketPrediction?.find(x => x.match === matchNum);
+    // Prefer the currently-displayed tree's match (teams/probs match what's on
+    // screen); fall back to the base prediction.
+    const m = _bracketDisplayByNum[matchNum]
+        || block?.bracketPrediction?.find(x => x.match === matchNum);
     if (!m) return;
     closeMatchDetail();
 
@@ -1852,6 +1898,9 @@ function openMatchDetail(matchNum) {
         close:      '⚖ Knappes Spiel — DVV-Differenz ≤&nbsp;10&nbsp;%; H2H als Tiebreaker',
         fifty_fifty:'🎲 50/50 — kein ausreichendes H2H und knappe DVV-Werte',
         no_data:    '❓ Keine Daten verfügbar — 50/50',
+        elo:        '🏅 ELO-Rating-Differenz (gewähltes Modell)',
+        played:     '✅ Bereits gespielt — echtes Ergebnis',
+        manual:     '✏ Manuell gesetzt',
     }[m.reason] || m.reason;
 
     const probAStr = (m.probA * 100).toFixed(1);
@@ -1996,30 +2045,276 @@ function deriveManualBracket(basePrediction, overrides) {
     return results;
 }
 
-// Counts expected matches per player from a derived bracket.
-// Returns {player_id: match_count} or null if sim data unavailable.
-function computeManualExpectedMatches() {
-    const block = tournamentSim?.byGender?.[bracketGender];
+// ── Tournament-tree prediction (current / dvv / elo / personal) ────────────────
+//
+// A "tree" is one set of per-match win probabilities. deriveTreeBracket()
+// re-derives the whole bracket deterministically for the chosen method,
+// resolving W/L refs from the computed winners so later-round matchups reflect
+// that method. Already-played matches (base reason==='played') stay LOCKED to
+// the real result for every tree. From the derived bracket we read per-player
+// expected matches (→ Turnier-Prognose) and round levels (→ Finale-Fokus).
+
+const TREE_LABELS = { current: 'Aktuell', dvv: 'DVV-Punkte', elo: 'ELO', personal: 'Persönlich' };
+const TREE_ICONS  = { current: '🎯', dvv: '📊', elo: '🏅', personal: '✏' };
+const TREE_ORDER  = ['current', 'dvv', 'elo', 'personal'];
+
+let _eloTreeModel = localStorage.getItem('eloTreeModel') || 'ensemble';
+let _eloTreeIndex = null;          // { eloId: elo_combined } for _eloTreeIndexModel
+let _eloTreeIndexModel = null;     // which model _eloTreeIndex was built for
+
+// Mirror of scripts/elo/priors.py::_normalise (NFKD, strip marks, lower, collapse ws).
+function _normName(s) {
+    return (s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '')
+        .toLowerCase().split(/\s+/).filter(Boolean).join(' ');
+}
+function eloIdFromName(first, last) {
+    return `${_normName(last)}_${_normName(first)}`.replace(/^_+|_+$/g, '');
+}
+
+// Fetch the selected ELO model JSON (reusing the ranking-tab cache) and build a
+// name→rating index. Best-effort: on failure the ELO tree is simply unavailable.
+async function ensureEloTreeData() {
+    const model = _eloTreeModel;
+    if (_eloTreeIndexModel === model && _eloTreeIndex) return _eloTreeIndex;
+    let data = _eloDataByModel[model];
+    if (!data) {
+        try {
+            const r = await apiFetch(`data/${model}_current.json?t=` + Date.now());
+            if (!r.ok) throw new Error(r.status);
+            data = await r.json();
+            _eloDataByModel[model] = data;
+        } catch { _eloTreeIndex = null; _eloTreeIndexModel = model; return null; }
+    }
+    const idx = {};
+    for (const pl of (data.players || [])) {
+        if (pl.id != null && pl.elo_combined != null) idx[pl.id] = pl.elo_combined;
+    }
+    _eloTreeIndex = idx;
+    _eloTreeIndexModel = model;
+    return idx;
+}
+
+// Per-team rating lookups for a gender block.
+// dvv: team-name → DVV points; elo: team-name → mean elo_combined (absent = unmapped).
+function buildTeamRatingMaps(block, eloIndex) {
+    const byId = {};
+    for (const p of allPlayers) byId[p.id] = p;
+    const dvv = {}, elo = {};
+    for (const t of (block.teams || [])) {
+        if (t.dvvPoints != null) dvv[t.name] = t.dvvPoints;
+        if (eloIndex) {
+            const ratings = [];
+            for (const pid of (t.playerIds || [])) {
+                const p = byId[pid];
+                if (!p) continue;
+                const r = eloIndex[eloIdFromName(p.firstName, p.lastName)];
+                if (r != null) ratings.push(r);
+            }
+            if (ratings.length) elo[t.name] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+        }
+    }
+    // Fill any DVV gaps from the match points fields.
+    for (const m of (block.bracketPrediction || [])) {
+        if (m.teamA && dvv[m.teamA] == null && m.ptsA != null) dvv[m.teamA] = m.ptsA;
+        if (m.teamB && dvv[m.teamB] == null && m.ptsB != null) dvv[m.teamB] = m.ptsB;
+    }
+    return { dvv, elo };
+}
+
+// Re-derive the full bracket for one gender + tree. Returns {matchNum: {...}}
+// with display-ready fields (teamA/teamB/winner/loser/probA/reason/overridden).
+function deriveTreeBracket(gender, tree, eloIndex) {
+    const block = tournamentSim?.byGender?.[gender];
     if (!block?.bracketPrediction || !block?.teams) return null;
-    const overrides = getManualOverrides();
-    if (!Object.keys(overrides).length) return null;
+    const base = [...block.bracketPrediction].sort((a, b) => a.match - b.match);
+    const overrides = (tree === 'personal') ? getManualOverridesFor(gender) : {};
+    const useRatings = (tree === 'dvv' || tree === 'elo');
+    const maps = useRatings ? buildTeamRatingMaps(block, eloIndex) : null;
 
-    const derived = deriveManualBracket(block.bracketPrediction, overrides);
+    const seedSlots = {};
+    for (const m of base) {
+        if (m.refA && m.refA[0] === 'S' && m.teamA && m.teamA !== 'TBD') seedSlots[m.refA] = m.teamA;
+        if (m.refB && m.refB[0] === 'S' && m.teamB && m.teamB !== 'TBD') seedSlots[m.refB] = m.teamB;
+    }
+    const results = {};
+    const resolveRef = (ref) => {
+        if (!ref) return null;
+        const pfx = ref[0], n = parseInt(ref.slice(1));
+        if (pfx === 'S') return seedSlots[ref] ?? null;
+        if (pfx === 'W') return results[n]?.winner ?? null;
+        if (pfx === 'L') return results[n]?.loser ?? null;
+        return null;
+    };
+    // Rating-based probability that teamA beats teamB. Returns {p, fell} where
+    // fell=true means ELO fell back to the DVV ratio (a team was unmapped).
+    const ratingProb = (a, b) => {
+        if (tree === 'dvv') {
+            const pa = maps.dvv[a] ?? 0, pb = maps.dvv[b] ?? 0;
+            return { p: (pa + pb) > 0 ? pa / (pa + pb) : 0.5, fell: false };
+        }
+        const ra = maps.elo[a], rb = maps.elo[b];
+        if (ra == null || rb == null) {
+            const pa = maps.dvv[a] ?? 0, pb = maps.dvv[b] ?? 0;
+            return { p: (pa + pb) > 0 ? pa / (pa + pb) : 0.5, fell: true };
+        }
+        return { p: 1 / (1 + Math.pow(10, (rb - ra) / 400)), fell: false };
+    };
 
-    // Count matches played per team
+    for (const bm of base) {
+        const teamA = resolveRef(bm.refA) ?? bm.teamA ?? 'TBD';
+        const teamB = resolveRef(bm.refB) ?? bm.teamB ?? 'TBD';
+        const overridden = (bm.match in overrides);
+        let probA, reason, winner, loser;
+        if (bm.reason === 'played') {
+            // Locked to the real result (teams already fixed).
+            winner = bm.winner; loser = bm.loser;
+            probA = (winner === teamA) ? 1 : 0; reason = 'played';
+        } else if (overridden) {
+            winner = overrides[bm.match]; loser = (winner === teamA) ? teamB : teamA;
+            probA = (winner === teamA) ? 1 : 0; reason = 'manual';
+        } else if (teamA === 'TBD' || teamB === 'TBD') {
+            probA = 0.5; reason = 'no_data';
+            winner = (teamA !== 'TBD') ? teamA : teamB;
+            loser = (winner === teamA) ? teamB : teamA;
+        } else if (useRatings) {
+            const { p, fell } = ratingProb(teamA, teamB);
+            probA = p; reason = (tree === 'elo' && !fell) ? 'elo' : 'dvv';
+            winner = probA >= 0.5 ? teamA : teamB;
+            loser = (winner === teamA) ? teamB : teamA;
+        } else {
+            // current / personal (non-overridden) — reuse the base prediction.
+            probA = bm.probA; reason = bm.reason;
+            winner = (bm.probA >= bm.probB) ? teamA : teamB;
+            loser = (winner === teamA) ? teamB : teamA;
+        }
+        const carryBase = !useRatings;   // keep H2H/trace only for current/personal
+        results[bm.match] = {
+            match: bm.match, teamA, teamB, refA: bm.refA, refB: bm.refB,
+            probA: Math.round(probA * 1000) / 1000,
+            probB: Math.round((1 - probA) * 1000) / 1000,
+            winner, loser, overridden, reason,
+            h2hUsed: reason === 'h2h' || reason === 'h2h_ind',
+            h2h: carryBase ? bm.h2h : null,
+            indBreakdown: carryBase ? bm.indBreakdown : null,
+            ptsA: maps ? (maps.dvv[teamA] ?? bm.ptsA) : bm.ptsA,
+            ptsB: maps ? (maps.dvv[teamB] ?? bm.ptsB) : bm.ptsB,
+            traceA: carryBase ? bm.traceA : null,
+            traceB: carryBase ? bm.traceB : null,
+        };
+    }
+    return results;
+}
+
+function _expectedMatchesFromDerived(derived, teams) {
     const teamMatches = {};
     for (const mr of Object.values(derived)) {
         if (mr.teamA && mr.teamA !== 'TBD') teamMatches[mr.teamA] = (teamMatches[mr.teamA] || 0) + 1;
         if (mr.teamB && mr.teamB !== 'TBD') teamMatches[mr.teamB] = (teamMatches[mr.teamB] || 0) + 1;
     }
-
-    // Map teams → player IDs
-    const playerMap = {};
-    for (const team of block.teams) {
-        const em = teamMatches[team.name] ?? 0;
-        for (const pid of (team.playerIds || [])) playerMap[pid] = em;
+    const out = {};
+    for (const t of teams) {
+        const em = teamMatches[t.name] ?? 0;
+        for (const pid of (t.playerIds || [])) out[pid] = em;
     }
-    return playerMap;
+    return out;
+}
+
+function _roundLevelsFromDerived(derived, base, teams) {
+    const nums = Object.keys(derived).map(Number).sort((a, b) => a - b);
+    if (!nums.length) return {};
+    const finalNum = nums[nums.length - 1];
+    const finalDef = base.find(m => m.match === finalNum);
+    const semiNums = new Set();
+    for (const ref of [finalDef?.refA, finalDef?.refB]) {
+        if (ref && ref[0] === 'W') semiNums.add(parseInt(ref.slice(1)));
+    }
+    const teamRound = {};
+    const fin = derived[finalNum];
+    if (fin) {
+        if (fin.teamA && fin.teamA !== 'TBD') teamRound[fin.teamA] = 2;
+        if (fin.teamB && fin.teamB !== 'TBD') teamRound[fin.teamB] = 2;
+    }
+    for (const sn of semiNums) {
+        const semi = derived[sn];
+        if (!semi) continue;
+        if (semi.teamA && semi.teamA !== 'TBD' && !teamRound[semi.teamA]) teamRound[semi.teamA] = 1;
+        if (semi.teamB && semi.teamB !== 'TBD' && !teamRound[semi.teamB]) teamRound[semi.teamB] = 1;
+    }
+    const out = {};
+    for (const t of teams) {
+        const rv = teamRound[t.name] ?? 0;
+        for (const pid of (t.playerIds || [])) out[pid] = rv;
+    }
+    return out;
+}
+
+// Per-player expected matches / round level for a tree, merged across genders.
+function expectedMatchesFor(tree, eloIndex) {
+    const merged = {};
+    for (const g of ['m', 'f']) {
+        const block = tournamentSim?.byGender?.[g];
+        if (!block?.bracketPrediction || !block?.teams) continue;
+        const d = deriveTreeBracket(g, tree, eloIndex);
+        if (!d) continue;
+        const em = _expectedMatchesFromDerived(d, block.teams);
+        for (const [pid, v] of Object.entries(em)) merged[pid] = Math.max(merged[pid] ?? 0, v);
+    }
+    return merged;
+}
+function roundLevelsFor(tree, eloIndex) {
+    const merged = {};
+    for (const g of ['m', 'f']) {
+        const block = tournamentSim?.byGender?.[g];
+        if (!block?.bracketPrediction || !block?.teams) continue;
+        const d = deriveTreeBracket(g, tree, eloIndex);
+        if (!d) continue;
+        const rl = _roundLevelsFromDerived(d, block.bracketPrediction, block.teams);
+        for (const [pid, v] of Object.entries(rl)) merged[pid] = Math.max(merged[pid] ?? 0, v);
+    }
+    return merged;
+}
+
+// Which trees are currently usable (drives which panels appear).
+function treeAvailable(tree, eloIndex) {
+    if (!tournamentSim?.byGender) return false;
+    const anyBracket = ['m', 'f'].some(g => {
+        const b = tournamentSim.byGender[g];
+        return b?.bracketPrediction?.length && b?.teams?.length;
+    });
+    if (!anyBracket) return false;
+    if (tree === 'personal') return ['m', 'f'].some(g => Object.keys(getManualOverridesFor(g)).length);
+    if (tree === 'elo') {
+        if (!eloIndex) return false;
+        return ['m', 'f'].some(g => {
+            const b = tournamentSim.byGender[g];
+            if (!b?.teams) return false;
+            return Object.keys(buildTeamRatingMaps(b, eloIndex).elo).length > 0;
+        });
+    }
+    return true; // current, dvv
+}
+function availableTrees(eloIndex) {
+    return TREE_ORDER.filter(t => treeAvailable(t, eloIndex));
+}
+function algLabel(alg) {
+    if (ALG_LABELS[alg]) return ALG_LABELS[alg];
+    if (alg.startsWith('prog-')) {
+        const t = alg.slice(5);
+        return { name: `Turnier-Prognose (${TREE_LABELS[t] ?? t})`, icon: TREE_ICONS[t] ?? '🎯',
+                 desc: `${TREE_LABELS[t] ?? t}-Baum × Match-Schnitt` };
+    }
+    if (alg.startsWith('final-')) {
+        const t = alg.slice(6);
+        return { name: `Finale-Fokus (${TREE_LABELS[t] ?? t})`, icon: '🏆',
+                 desc: `HF/Finale laut ${TREE_LABELS[t] ?? t}-Baum` };
+    }
+    return { name: alg, icon: '', desc: '' };
+}
+function objectiveMeta(alg) {
+    if (OBJECTIVE_META[alg]) return OBJECTIVE_META[alg];
+    if (alg.startsWith('prog-'))  return { label: 'Erw. Punkte (Baum)', short: 'Erw.', digits: 0 };
+    if (alg.startsWith('final-')) return { label: 'Final-Round Score',  short: 'F-Score', digits: 0 };
+    return { label: 'Score', short: 'val', digits: 1 };
 }
 
 function renderH2HSection(m) {
@@ -2583,66 +2878,18 @@ function getObjectiveValue(player, alg) {
         // to Bayesian shrinkage if not enough history (<3 tournaments).
         return player.varianceScore ?? player.adjustedPT ?? player.avgPerTournament;
     }
-    if (alg === 'form-trend')        return player.formScore             ?? player.avgPerTournament;
-    if (alg === 'tournament')        return player.expectedPoints        ?? player.avgPerTournament;
-    if (alg === 'tournament-manual') return player.manualExpectedPoints  ?? player.avgPerTournament;
-    if (alg === 'final-focus')       return player.finalRoundObjective   ?? player.avgPerTournament;
-    return player.avgPerTournament;
-}
-
-// Determine which players reach semi-finals (roundLevel 1) or final (roundLevel 2)
-// from the bracket prediction. Uses manual overrides if set, auto-predicted otherwise.
-// Returns {playerId: roundLevel} merged across both genders.
-function computeFinalRoundValues() {
-    if (!tournamentSim) return null;
-    const merged = {};
-
-    for (const gender of ['m', 'f']) {
-        const block = tournamentSim.byGender?.[gender];
-        if (!block?.bracketPrediction || !block?.teams) continue;
-
-        // Read manual overrides for THIS gender directly (used to be gated on the
-        // currently-displayed bracketGender, which made badges stale for the
-        // other gender — fixed by parameterizing the localStorage lookup).
-        const overrides = getManualOverridesFor(gender);
-        const derived = deriveManualBracket(block.bracketPrediction, overrides);
-
-        const matchNums = Object.keys(derived).map(Number).sort((a, b) => a - b);
-        if (!matchNums.length) continue;
-
-        const finalNum = matchNums[matchNums.length - 1];
-        const finalDef = block.bracketPrediction.find(m => m.match === finalNum);
-
-        // Which match numbers are semi-finals? Those whose winners (W<n>) feed into the final.
-        const semiNums = new Set();
-        for (const ref of [finalDef?.refA, finalDef?.refB]) {
-            if (ref && ref[0] === 'W') semiNums.add(parseInt(ref.slice(1)));
-        }
-
-        // Assign round levels: 2 = final, 1 = semi-final
-        const teamRound = {};
-        const fin = derived[finalNum];
-        if (fin) {
-            teamRound[fin.teamA] = 2;
-            teamRound[fin.teamB] = 2;
-        }
-        for (const sn of semiNums) {
-            const semi = derived[sn];
-            if (semi) {
-                if (!teamRound[semi.teamA]) teamRound[semi.teamA] = 1;
-                if (!teamRound[semi.teamB]) teamRound[semi.teamB] = 1;
-            }
-        }
-
-        // Map team names → player IDs
-        for (const team of block.teams) {
-            const rv = teamRound[team.name] ?? 0;
-            for (const pid of (team.playerIds || [])) {
-                merged[pid] = Math.max(merged[pid] ?? 0, rv);
-            }
-        }
+    if (alg === 'form-trend') return player.formScore ?? player.avgPerTournament;
+    // Per-tree bracket algorithms: prog-<tree> (expected points from that tree),
+    // final-<tree> (round level × 1000 + season avg as tiebreaker).
+    if (alg.startsWith('prog-')) {
+        const t = alg.slice(5);
+        return player.treeExpPoints?.[t] ?? player.avgPerTournament;
     }
-    return merged;
+    if (alg.startsWith('final-')) {
+        const t = alg.slice(6);
+        return (player.treeRound?.[t] ?? 0) * 1000 + player.avgPerTournament;
+    }
+    return player.avgPerTournament;
 }
 
 // Compute Bayesian-adjusted pts/tournament for each player.
@@ -2861,8 +3108,11 @@ function optimizeTeam() {
 
         // Defer heavy work so the spinner paints, but wrap in try/finally so
         // any throw can't leave the button disabled and the page silently dead.
-        setTimeout(() => {
+        setTimeout(async () => {
             try {
+                // Make sure the selected ELO model is loaded so the ELO tree can
+                // be built (best-effort — the ELO panels are skipped if it fails).
+                await ensureEloTreeData().catch(() => {});
                 runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen, minWomen);
                 renderCompare();
                 switchToTab('compare');
@@ -2914,35 +3164,27 @@ function runOptimizePipeline(budget, teamSize, maxBlock, maxAbwehr, minMen = 0, 
         !bannedPlayerIds.has(p.id)
     );
 
-    // Run all algorithms — bracket-based ones only if sim is loaded,
-    // history-based form-trend only if at least one player has ≥3 tournaments.
+    // Run all algorithms — history-based form-trend only if at least one player
+    // has ≥3 tournaments; bracket-based ones once per available prediction tree.
     const algsToRun = ['optimal', 'consistent'];
     const hasFormData = availablePlayers.some(p => p.formScore != null);
     if (hasFormData) algsToRun.push('form-trend');
-    if (tournamentSim !== null) algsToRun.push('tournament');
 
-    const manualMap = computeManualExpectedMatches();
-    if (manualMap) {
+    // Per-tree bracket algorithms: for each available tree (current/dvv/elo/
+    // personal) compute deterministic expected matches → Turnier-Prognose and
+    // round levels → Finale-Fokus, stored per-tree on each player.
+    availablePlayers.forEach(p => { p.treeExpPoints = {}; p.treeRound = {}; });
+    const trees = availableTrees(_eloTreeIndex);
+    for (const tree of trees) {
+        const em = expectedMatchesFor(tree, _eloTreeIndex);
+        const rl = roundLevelsFor(tree, _eloTreeIndex);
         availablePlayers.forEach(p => {
-            p.manualExpectedMatches = manualMap[p.id] ?? null;
-            p.manualExpectedPoints  = (p.manualExpectedMatches !== null && p.avgPerMatch > 0)
-                ? p.avgPerMatch * p.manualExpectedMatches : null;
+            const m = em[p.id];
+            p.treeExpPoints[tree] = (m != null && p.avgPerMatch > 0) ? p.avgPerMatch * m : null;
+            p.treeRound[tree]     = rl[p.id] ?? 0;
         });
-        algsToRun.push('tournament-manual');
-    }
-
-    // Finale-Fokus: uses manual bracket if set, auto-predicted otherwise.
-    // Always available when sim data is present.
-    if (tournamentSim !== null) {
-        const frMap = computeFinalRoundValues() ?? {};
-        availablePlayers.forEach(p => {
-            const rv = frMap[p.id] ?? 0;
-            p.finalRoundValue     = rv;
-            // Primary objective: round level (semi=1000, final=2000),
-            // tiebreaker: avgPerTournament (typically 20–200, well below 1000).
-            p.finalRoundObjective = rv * 1000 + p.avgPerTournament;
-        });
-        algsToRun.push('final-focus');
+        algsToRun.push(`prog-${tree}`);
+        algsToRun.push(`final-${tree}`);
     }
 
     comparisonResults = {};
@@ -2975,52 +3217,81 @@ function getCaptain(team, alg) {
 function buildTeamSummary(team, alg) {
     const captain = getCaptain(team, alg);
 
+    // Which kind of bracket algorithm (if any) is this, and for which tree?
+    const isProg  = alg.startsWith('prog-');
+    const isFinal = alg.startsWith('final-');
+    const tree    = isProg ? alg.slice(5) : isFinal ? alg.slice(6) : null;
+
     // Base sums (without captain doubling)
-    const totalCost      = team.reduce((s, p) => s + p.price, 0);
-    const totalTP        = team.reduce((s, p) => s + p.tp, 0);
-    const totalPT        = team.reduce((s, p) => s + p.avgPerTournament, 0);
-    const totalAdj       = team.reduce((s, p) => s + (p.adjustedPT ?? p.avgPerTournament), 0);
-    const totalExp       = team.reduce((s, p) => s + (p.expectedPoints ?? 0), 0);
-    const totalManualExp = team.reduce((s, p) => s + (p.manualExpectedPoints ?? 0), 0);
+    const totalCost = team.reduce((s, p) => s + p.price, 0);
+    const totalTP   = team.reduce((s, p) => s + p.tp, 0);
+    const totalPT   = team.reduce((s, p) => s + p.avgPerTournament, 0);
+    const totalAdj  = team.reduce((s, p) => s + (p.adjustedPT ?? p.avgPerTournament), 0);
+    // Expected points for this tree (only meaningful for prog-<tree> panels).
+    const expOf     = (p) => (isProg ? (p.treeExpPoints?.[tree] ?? 0) : 0);
+    const totalExp  = team.reduce((s, p) => s + expOf(p), 0);
 
     // With captain bonus (= base + 0.5 × captain's value, since they score 1.5×)
-    const captainPT       = captain?.avgPerTournament       ?? 0;
-    const captainExp      = captain?.expectedPoints         ?? 0;
-    const captainManual   = captain?.manualExpectedPoints   ?? 0;
-    const totalPTCaptain       = totalPT       + 0.5 * captainPT;
-    const totalExpCaptain      = totalExp      + 0.5 * captainExp;
-    const totalManualExpCaptain= totalManualExp+ 0.5 * captainManual;
+    const captainPT     = captain?.avgPerTournament ?? 0;
+    const totalPTCaptain  = totalPT  + 0.5 * captainPT;
+    const totalExpCaptain = totalExp + 0.5 * expOf(captain ?? {});
 
     const blockCount  = team.filter(p => p.pos === 'Block').length;
     const abwehrCount = team.filter(p => p.pos === 'Abwehr').length;
     const hybridCount = team.filter(p => p.pos === 'Hybrid').length;
 
-    // For final-focus: count players reaching semi-final (≥1) and final (≥2)
-    const semiFinalCount = team.filter(p => (p.finalRoundValue ?? 0) >= 1).length;
-    const finalCount     = team.filter(p => (p.finalRoundValue ?? 0) >= 2).length;
+    // For final-<tree>: count players reaching semi-final (≥1) and final (≥2).
+    const roundOf        = (p) => (isFinal ? (p.treeRound?.[tree] ?? 0) : 0);
+    const semiFinalCount = team.filter(p => roundOf(p) >= 1).length;
+    const finalCount     = team.filter(p => roundOf(p) >= 2).length;
 
     return {
-        players: team, alg, captainId: captain?.id ?? null,
+        players: team, alg, tree, isProg, isFinal, captainId: captain?.id ?? null,
         totalCost, totalTP,
-        totalPT,  totalPTCaptain,
+        totalPT, totalPTCaptain,
         totalAdj,
         totalExp, totalExpCaptain,
-        totalManualExp, totalManualExpCaptain,
         blockCount, abwehrCount, hybridCount,
         semiFinalCount, finalCount,
     };
 }
 
+// Static (non-tree) algorithms. Per-tree bracket algorithms (prog-<tree> /
+// final-<tree>) get their labels from algLabel() instead.
 const ALG_LABELS = {
-    optimal:             { name: 'Optimal',            icon: '⭐', desc: 'max Σ Ø/Turnier'              },
-    consistent:          { name: 'Konsistent',         icon: '🛡',  desc: 'Ø − λ·Streuung'               },
-    'form-trend':        { name: 'Form-Trend',         icon: '📈', desc: 'Letzte 3 Turniere stärker'    },
-    tournament:          { name: 'Turnier-Prognose',   icon: '🎯', desc: 'Sim × Match-Schnitt'         },
-    'tournament-manual': { name: 'Turnier-Manuell',    icon: '✏', desc: 'Manueller Baum × Schnitt'    },
-    'final-focus':       { name: 'Finale-Fokus',       icon: '🏆', desc: 'max HF/Finale-Spieler'       },
+    optimal:      { name: 'Optimal',    icon: '⭐', desc: 'max Σ Ø/Turnier'           },
+    consistent:   { name: 'Konsistent', icon: '🛡',  desc: 'Ø − λ·Streuung'            },
+    'form-trend': { name: 'Form-Trend', icon: '📈', desc: 'Letzte 3 Turniere stärker' },
 };
 
 // ── Compare tab ───────────────────────────────────────────────────────────────
+
+// Panel order + hidden set (persisted). Users drag to reorder and can hide
+// panels they don't care about; new/unknown alg-ids are appended in run order.
+let _compareOrder  = (() => { try { return JSON.parse(localStorage.getItem('compareOrder')  || '[]'); } catch { return []; } })();
+let _compareHidden = new Set((() => { try { return JSON.parse(localStorage.getItem('compareHidden') || '[]'); } catch { return []; } })());
+let _cmpDragAlg = null;
+function _saveCompareOrder()  { localStorage.setItem('compareOrder',  JSON.stringify(_compareOrder)); }
+function _saveCompareHidden() { localStorage.setItem('compareHidden', JSON.stringify([..._compareHidden])); }
+function _orderedAlgs(algs) {
+    const set = new Set(algs);
+    const ordered = _compareOrder.filter(a => set.has(a));
+    for (const a of algs) if (!ordered.includes(a)) ordered.push(a);
+    return ordered;
+}
+function cmpDragStart(ev, alg) { _cmpDragAlg = alg; ev.dataTransfer.effectAllowed = 'move'; }
+function cmpDragOver(ev)       { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; }
+function cmpDrop(ev, targetAlg) {
+    ev.preventDefault();
+    if (!_cmpDragAlg || _cmpDragAlg === targetAlg) { _cmpDragAlg = null; return; }
+    let order = _orderedAlgs(Object.keys(comparisonResults)).filter(a => a !== _cmpDragAlg);
+    const idx = order.indexOf(targetAlg);
+    order.splice(idx < 0 ? order.length : idx, 0, _cmpDragAlg);
+    _compareOrder = order; _saveCompareOrder(); _cmpDragAlg = null;
+    renderCompare();
+}
+function cmpHidePanel(alg) { _compareHidden.add(alg);    _saveCompareHidden(); renderCompare(); }
+function cmpShowPanel(alg) { _compareHidden.delete(alg); _saveCompareHidden(); renderCompare(); }
 
 function renderCompare() {
     const grid = document.getElementById('compareGrid');
@@ -3029,68 +3300,68 @@ function renderCompare() {
         return;
     }
 
-    const algs = Object.keys(comparisonResults);
-    if (algs.length === 0) { grid.innerHTML = '<div class="no-results">Keine Ergebnisse.</div>'; return; }
+    const allAlgs = Object.keys(comparisonResults);
+    if (allAlgs.length === 0) { grid.innerHTML = '<div class="no-results">Keine Ergebnisse.</div>'; return; }
 
-    // Determine winning value per metric for highlighting
-    const max = (key) => Math.max(...algs.map(a => comparisonResults[a][key] || 0));
-    const min = (key) => Math.min(...algs.map(a => comparisonResults[a][key] || Infinity));
-    // Use captain-inclusive values for comparisons (these are the actual fantasy points)
-    const bestPT        = max('totalPTCaptain');
-    const bestExp       = max('totalExpCaptain');
-    const bestTP        = max('totalTP');
-    const bestCost      = min('totalCost');
-    const bestManualExp = max('totalManualExpCaptain');
-    const bestSemiCount  = max('semiFinalCount');
-    const bestFinalCount = max('finalCount');
-    const showExp       = algs.some(a => comparisonResults[a].totalExp > 0);
-    const showManualExp = algs.some(a => comparisonResults[a].totalManualExp > 0);
+    const ordered   = _orderedAlgs(allAlgs);
+    const algs       = ordered.filter(a => !_compareHidden.has(a));   // visible
+    const hiddenAlgs = ordered.filter(a =>  _compareHidden.has(a));
 
-    // Union of all selected players, used to mark "in this team" rows
+    // Best value per metric (only among visible panels).
+    const vis     = algs.map(a => comparisonResults[a]);
+    const progRs  = vis.filter(r => r.isProg);
+    const finalRs = vis.filter(r => r.isFinal);
+    const bestPT     = Math.max(0, ...vis.map(r => r.totalPTCaptain || 0));
+    const bestExp    = progRs.length  ? Math.max(...progRs.map(r => r.totalExpCaptain || 0)) : 0;
+    const bestTP     = Math.max(0, ...vis.map(r => r.totalTP || 0));
+    const bestCost   = Math.min(Infinity, ...vis.map(r => r.totalCost || Infinity));
+    const bestSemi   = finalRs.length ? Math.max(...finalRs.map(r => r.semiFinalCount || 0)) : 0;
+    const bestFinalC = finalRs.length ? Math.max(...finalRs.map(r => r.finalCount || 0)) : 0;
+
+    // Union of all selected players (across visible panels), to mark shared rows.
     const allSelected = {};
-    algs.forEach(a => {
-        comparisonResults[a].players.forEach(p => {
-            allSelected[p.id] = (allSelected[p.id] || 0) + 1;
-        });
-    });
+    algs.forEach(a => comparisonResults[a].players.forEach(p => {
+        allSelected[p.id] = (allSelected[p.id] || 0) + 1;
+    }));
 
     const columns = algs.map(a => {
         const r    = comparisonResults[a];
-        const meta = ALG_LABELS[a] || { name: a, icon: '', desc: '' };
-        const isManualAlg     = a === 'tournament-manual';
-        const isFinalFocusAlg = a === 'final-focus';
+        const meta = algLabel(a);
+        const isProg = r.isProg, isFinal = r.isFinal, tree = r.tree;
 
         const playerRows = r.players
             .slice()
             .sort((x, y) => {
-                if (isFinalFocusAlg) {
-                    return (y.finalRoundObjective ?? y.avgPerTournament)
-                         - (x.finalRoundObjective ?? x.avgPerTournament);
+                if (isFinal) {
+                    const vy = (y.treeRound?.[tree] ?? 0) * 1000 + y.avgPerTournament;
+                    const vx = (x.treeRound?.[tree] ?? 0) * 1000 + x.avgPerTournament;
+                    return vy - vx;
                 }
-                const vx = isManualAlg ? (x.manualExpectedPoints ?? x.avgPerTournament)
-                                       : (x.expectedPoints       ?? x.avgPerTournament);
-                const vy = isManualAlg ? (y.manualExpectedPoints ?? y.avgPerTournament)
-                                       : (y.expectedPoints       ?? y.avgPerTournament);
-                return vy - vx;
+                if (isProg) {
+                    return (y.treeExpPoints?.[tree] ?? y.avgPerTournament)
+                         - (x.treeExpPoints?.[tree] ?? x.avgPerTournament);
+                }
+                return y.avgPerTournament - x.avgPerTournament;
             })
             .map(p => {
                 const inAll     = allSelected[p.id] === algs.length;
                 const isCaptain = p.id === r.captainId;
-                const expVal    = isManualAlg ? p.manualExpectedPoints : p.expectedPoints;
 
-                // For final-focus: show "F" or "HF" badge instead of sim expected pts
                 let ept = '';
-                if (isFinalFocusAlg) {
-                    const rv = p.finalRoundValue ?? 0;
+                if (isFinal) {
+                    const rv = p.treeRound?.[tree] ?? 0;
                     if (rv >= 2) {
                         ept = `<span class="cmp-mini cmp-round-badge cmp-round-final" title="Erreicht das Finale">F</span>`;
                     } else if (rv === 1) {
                         ept = `<span class="cmp-mini cmp-round-badge cmp-round-semi" title="Erreicht das Halbfinale">HF</span>`;
                     }
-                } else if (expVal !== undefined && expVal !== null) {
-                    ept = `<span class="cmp-mini ${isCaptain ? 'cmp-captain-pts' : ''}"
-                          title="${isCaptain ? 'Captain: 1,5× Punkte' : (isManualAlg ? 'Erw. Punkte (Manuell)' : 'Erw. Punkte (Sim)')}">
-                          ${(isCaptain ? expVal * 1.5 : expVal).toFixed(0)}</span>`;
+                } else if (isProg) {
+                    const ev = p.treeExpPoints?.[tree];
+                    if (ev != null) {
+                        ept = `<span class="cmp-mini ${isCaptain ? 'cmp-captain-pts' : ''}"
+                              title="${isCaptain ? 'Captain: 1,5× Punkte' : 'Erw. Punkte (' + (TREE_LABELS[tree] ?? tree) + ')'}">
+                              ${(isCaptain ? ev * 1.5 : ev).toFixed(0)}</span>`;
+                    }
                 }
 
                 const captainBadge = isCaptain
@@ -3116,39 +3387,41 @@ function renderCompare() {
                 </div>`;
             }).join('');
 
-        // Totals use captain-inclusive values (actual fantasy score)
-        const expDisplayVal   = isManualAlg ? r.totalManualExpCaptain : r.totalExpCaptain;
-        const expBestClass    = isManualAlg
-            ? (r.totalManualExpCaptain === bestManualExp && r.totalManualExpCaptain > 0 ? 'cmp-best' : '')
-            : (r.totalExpCaptain       === bestExp       && r.totalExpCaptain       > 0 ? 'cmp-best' : '');
-        const showExpRow      = isManualAlg ? showManualExp : showExp;
+        const expBestClass = (isProg && r.totalExpCaptain === bestExp && r.totalExpCaptain > 0) ? 'cmp-best' : '';
 
         const activeBanned = bannedPlayerIds.size;
         const lockedNote = (r.lockedCount > 0 || activeBanned > 0)
             ? `<div class="cmp-locked-note">${r.lockedCount > 0 ? `🔒 ${r.lockedCount} fest` : ''}${r.lockedCount > 0 && activeBanned > 0 ? ' · ' : ''}${activeBanned > 0 ? `🚫 ${activeBanned} ausgeschlossen` : ''}</div>`
             : '';
-        const finalFocusTotals = isFinalFocusAlg ? `
-                <div class="cmp-total ${r.semiFinalCount === bestSemiCount && r.semiFinalCount > 0 ? 'cmp-best' : ''}">
-                    <div class="cmp-total-label">HF/F-Spieler</div>
+        const finalTotals = isFinal ? `
+                <div class="cmp-total ${r.semiFinalCount === bestSemi && r.semiFinalCount > 0 ? 'cmp-best' : ''}">
+                    <div class="cmp-total-label">HF+F-Spieler</div>
                     <div class="cmp-total-value">${r.semiFinalCount}</div>
                 </div>
-                <div class="cmp-total ${r.finalCount === bestFinalCount && r.finalCount > 0 ? 'cmp-best' : ''}">
+                <div class="cmp-total ${r.finalCount === bestFinalC && r.finalCount > 0 ? 'cmp-best' : ''}">
                     <div class="cmp-total-label">Finale-Spieler</div>
                     <div class="cmp-total-value">${r.finalCount}</div>
                 </div>` : '';
 
         return `
-        <div class="cmp-col ${isManualAlg ? 'cmp-col-manual' : ''} ${isFinalFocusAlg ? 'cmp-col-final' : ''}">
+        <div class="cmp-col ${isProg ? 'cmp-col-prog' : ''} ${isFinal ? 'cmp-col-final' : ''}"
+             draggable="true" data-alg="${a}"
+             ondragstart="cmpDragStart(event,'${a}')" ondragover="cmpDragOver(event)" ondrop="cmpDrop(event,'${a}')">
             <div class="cmp-head">
-                <div class="cmp-title">${meta.icon} ${meta.name}</div>
+                <div class="cmp-head-top">
+                    <span class="cmp-drag-handle" title="Ziehen zum Sortieren">⠿</span>
+                    <div class="cmp-title">${meta.icon} ${meta.name}</div>
+                    <button class="cmp-hide-btn" title="Panel ausblenden"
+                            onclick="event.stopPropagation();cmpHidePanel('${a}')">✕</button>
+                </div>
                 <div class="cmp-desc">${meta.desc}</div>
                 ${lockedNote}
             </div>
             <div class="cmp-totals">
-                ${finalFocusTotals}
-                <div class="cmp-total ${expBestClass}" style="${showExpRow && !isFinalFocusAlg ? '' : 'display:none'}">
+                ${finalTotals}
+                <div class="cmp-total ${expBestClass}" style="${isProg ? '' : 'display:none'}">
                     <div class="cmp-total-label">Erw. Punkte</div>
-                    <div class="cmp-total-value">${expDisplayVal.toFixed(0)}</div>
+                    <div class="cmp-total-value">${(r.totalExpCaptain || 0).toFixed(0)}</div>
                 </div>
                 <div class="cmp-total ${r.totalPTCaptain === bestPT ? 'cmp-best' : ''}">
                     <div class="cmp-total-label">Σ Ø/Turnier</div>
@@ -3172,9 +3445,16 @@ function renderCompare() {
         </div>`;
     }).join('');
 
+    const hiddenBar = hiddenAlgs.length ? `
+        <div class="cmp-hidden-bar">
+            <span class="cmp-hidden-label">Ausgeblendet:</span>
+            ${hiddenAlgs.map(a => `<button class="cmp-hidden-chip" onclick="cmpShowPanel('${a}')" title="Wieder einblenden">${algLabel(a).icon} ${algLabel(a).name} +</button>`).join('')}
+        </div>` : '';
+
     updatePicksHint();
-    grid.innerHTML = `<div class="cmp-grid">${columns}</div>
+    grid.innerHTML = `${hiddenBar}<div class="cmp-grid">${columns}</div>
         <p class="tab-hint" style="margin-top:1.5rem">
+            <span class="cmp-drag-handle" style="cursor:default">⠿</span> Panels ziehen zum Sortieren · ✕ blendet aus ·
             <span class="cmp-captain-badge" style="vertical-align:middle">C</span> = Captain (automatisch optimal gewählt, 1,5× Punkte) ·
             🔒 = Vorgesperrter Spieler (Picks-Tab) ·
             <strong>Σ Ø/Turnier &amp; Erw. Punkte</strong> enthalten bereits den Captain-Bonus ·
@@ -3311,9 +3591,8 @@ function openWhyChosen(playerId, alg) {
     const result = comparisonResults?.[alg];
     if (!player || !result) return;
 
-    const algMeta = (typeof ALG_LABELS !== 'undefined' && ALG_LABELS[alg])
-        || { name: alg, icon: '', desc: '' };
-    const objMeta = OBJECTIVE_META[alg] || { label: 'Score', short: 'val', digits: 1 };
+    const algMeta = algLabel(alg);
+    const objMeta = objectiveMeta(alg);
     const objVal  = getObjectiveValue(player, alg);
     const isCap   = result.captainId === player.id;
     const isLockd = lockedPlayerIds.has(player.id);
@@ -3452,7 +3731,7 @@ function closeWhyChosen() {
 
 // One-line explanation tailored to the algorithm's logic.
 function renderWhyExplanation(player, alg, alternatives) {
-    const objMeta = OBJECTIVE_META[alg] || { label: 'Score', digits: 1 };
+    const objMeta = objectiveMeta(alg);
     const v       = getObjectiveValue(player, alg);
     const better  = alternatives.filter(a => a.v > v);
     const worse   = alternatives.filter(a => a.v < v);
@@ -3460,20 +3739,24 @@ function renderWhyExplanation(player, alg, alternatives) {
     const fmt = (x, d = 1) => Number(x).toFixed(d);
 
     const intros = {
-        'optimal':           `Der <strong>Optimal</strong>-Algorithmus maximiert die Summe von <em>Ø Punkten/Turnier</em>
-                              über die ganze Saison — er belohnt rohe Konstanz.`,
-        'consistent':        `<strong>Konsistent</strong> verwendet einen Bayes-gedämpften Ø-Wert
-                              (kleinere Stichproben werden zum Pool-Mittel hingezogen, k=3),
-                              damit Spieler mit wenigen Turnieren nicht überschätzt werden.`,
-        'tournament':        `<strong>Turnier-Prognose</strong> kombiniert die Monte-Carlo-Simulation
-                              (wie weit kommt das Team?) mit dem persönlichen Punkteschnitt pro Match.`,
-        'tournament-manual': `<strong>Turnier-Manuell</strong> nimmt deinen manuell gesetzten Bracket
-                              und multipliziert ihn mit dem Match-Schnitt jedes Spielers.`,
-        'final-focus':       `<strong>Finale-Fokus</strong> priorisiert Spieler, deren Teams laut Prognose
-                              das Halbfinale (HF) oder Finale (F) erreichen — Konstanz tritt in den Hintergrund.`,
+        'optimal':    `Der <strong>Optimal</strong>-Algorithmus maximiert die Summe von <em>Ø Punkten/Turnier</em>
+                       über die ganze Saison — er belohnt rohe Konstanz.`,
+        'consistent': `<strong>Konsistent</strong> verwendet einen Bayes-gedämpften Ø-Wert
+                       (kleinere Stichproben werden zum Pool-Mittel hingezogen, k=3),
+                       damit Spieler mit wenigen Turnieren nicht überschätzt werden.`,
+        'form-trend': `<strong>Form-Trend</strong> gewichtet die letzten Turniere stärker als frühere.`,
     };
-
-    const intro = intros[alg] || 'Dieser Algorithmus maximiert eine spezifische Zielmetrik.';
+    let intro = intros[alg];
+    if (!intro && alg.startsWith('prog-')) {
+        const t = TREE_LABELS[alg.slice(5)] ?? alg.slice(5);
+        intro = `<strong>Turnier-Prognose (${t})</strong> multipliziert die erwarteten Matches aus dem
+                 <em>${t}</em>-Turnierbaum mit dem persönlichen Punkteschnitt pro Match.`;
+    } else if (!intro && alg.startsWith('final-')) {
+        const t = TREE_LABELS[alg.slice(6)] ?? alg.slice(6);
+        intro = `<strong>Finale-Fokus (${t})</strong> priorisiert Spieler, deren Teams laut
+                 <em>${t}</em>-Baum das Halbfinale (HF) oder Finale (F) erreichen — Konstanz tritt in den Hintergrund.`;
+    }
+    if (!intro) intro = 'Dieser Algorithmus maximiert eine spezifische Zielmetrik.';
 
     let comparison = '';
     if (alternatives.length === 0) {
