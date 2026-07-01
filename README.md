@@ -46,24 +46,38 @@ Ohne diesen Schritt funktioniert das Tool weiterhin — du verlierst nur den aut
 
 ### Optional: ELO-Ratings bauen
 
-Die ELO-Rangliste und der ELO-Turnierbaum brauchen einmal gebaute Rating-Dateien. Alle Modelle werden **lokal** berechnet (die gehostete Version rechnet nie selbst — sie liest nur fertige Dateien):
+Die 🏅 ELO-Rangliste und der ELO-Turnierbaum brauchen einmal gebaute Rating-Dateien. Alle Modelle werden **lokal** berechnet (die gehostete Version rechnet nie selbst — sie liest nur fertige Dateien).
+
+**Ein Befehl reicht** — er lädt fehlende Python-Pakete, scrapt die Turnierdaten und baut alle Modelle, mit Fortschrittsanzeige:
+
+- **Windows:** Doppelklick auf **`setup_elo.bat`** (oder im Terminal `setup_elo.bat`)
+- **macOS / Linux:** `chmod +x setup_elo.sh` (einmalig), dann **`./setup_elo.sh`**
+- **Überall:** `python scripts/elo/setup.py`
+
+Der erste Lauf lädt viel Historie (höfliches Rate-Limit) und dauert ~15–40 Min; alles wird gecached, ein erneuter Start überspringt bereits geladene Daten. Schneller Einstieg mit weniger Verlauf: `--quick` anhängen (z. B. `setup_elo.bat --quick`). Nur anschauen, was passieren würde: `--dry-run`.
+
+Danach die App starten (`python scripts/serve.py`) — die 🏅-Rangliste und der ELO-Turnierbaum zeigen dann echte Daten. Details + Methodik in [`zusammenfassung.md`](zusammenfassung.md).
+
+<details>
+<summary><strong>Für mehr Kontrolle</strong> — die einzelnen Schritte manuell</summary>
+
+Das Setup ruft der Reihe nach diese Phasen von `build_ratings.py` auf (Jahres-Listen sind **komma-separiert**):
 
 ```bash
-# Turnier-Daten scrapen (einmalig, mit höflichem Rate-Limit — dauert beim ersten Mal)
-python scripts/elo/build_ratings.py --phase discover --saisons 15..26 --gender m
-python scripts/elo/build_ratings.py --phase discover --saisons 15..26 --gender f
+# Turnierdaten scrapen (einmalig, gecached)
+python scripts/elo/build_ratings.py --phase discover --saisons 15,16,17,18,19,20,21,22,23,24,25,26 --gender m
+python scripts/elo/build_ratings.py --phase discover --saisons 15,16,17,18,19,20,21,22,23,24,25,26 --gender f
 python scripts/elo/build_ratings.py --phase tournaments
 python scripts/elo/build_ratings.py --phase teams
 python scripts/elo/build_ratings.py --phase fivb
-python scripts/elo/build_ratings.py --phase bvb-discover --years 2015..2026 --gender m
-python scripts/elo/build_ratings.py --phase bvb-discover --years 2015..2026 --gender f
+python scripts/elo/build_ratings.py --phase bvb-discover --years 2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,2026 --gender m
+python scripts/elo/build_ratings.py --phase bvb-discover --years 2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,2026 --gender f
 python scripts/elo/build_ratings.py --phase bvb-matches
 
 # Modelle offline bauen (kein Netz) — schreibt die *_current.json + Meta-Dateien
 python scripts/elo/build_ratings.py --phase build
 ```
-
-Danach zeigen die 🏅-Rangliste und der ELO-Turnierbaum echte Daten. Details + Methodik in [`zusammenfassung.md`](zusammenfassung.md).
+</details>
 
 ## Wie's funktioniert (Kurz)
 
