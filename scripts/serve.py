@@ -157,62 +157,9 @@ def _data_path_min_role(path: str) -> str:
     return "admin"
 
 
-# ── Cloud Run Jobs integration ───────────────────────────────────────────────
-# When ELO_REFRESH_JOB_NAME is set (Cloud Run deploy), /api/elo-refresh fires
-# the named Cloud Run Job instead of running smart_refresh() in-process. The
-# job uses the same Docker image but runs with 2 GiB RAM / 1 h timeout so it
-# can complete a full rebuild without hitting the Service request-timeout.
-# Self-host leaves the env-var unset and keeps the in-process path.
-
-_ELO_JOB_NAME = os.environ.get("ELO_REFRESH_JOB_NAME", "").strip()
-# e.g. "projects/gbt-fantasy-optimizer/locations/us-central1/jobs/elo-rebuild"
-
-_METADATA_TOKEN_URL = (
-    "http://metadata.google.internal/computeMetadata/v1/"
-    "instance/service-accounts/default/token"
-)
-
-
-def _metadata_token() -> str:
-    import urllib.request
-    req = urllib.request.Request(_METADATA_TOKEN_URL,
-                                 headers={"Metadata-Flavor": "Google"})
-    with urllib.request.urlopen(req, timeout=5) as r:
-        data = json.loads(r.read().decode("utf-8"))
-    return data["access_token"]
-
-
-def _run_job_api(method: str, url: str, body: dict | None = None) -> dict:
-    import urllib.request
-    headers = {
-        "Authorization": f"Bearer {_metadata_token()}",
-        "Content-Type": "application/json",
-    }
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=15) as r:
-        raw = r.read().decode("utf-8")
-    return json.loads(raw) if raw else {}
-
-
-def _job_execution_to_phase(exec_doc: dict) -> tuple[str, str, dict | None]:
-    """Map a Cloud Run Jobs Execution document to (phase, message, summary).
-
-    Phase vocabulary matches the in-process refresh status so the UI doesn't
-    need to know the difference. Summary is set only on completion."""
-    conds = exec_doc.get("conditions", []) or []
-    completed = next((c for c in conds if c.get("type") == "Completed"), None)
-    if completed:
-        state = completed.get("state", "")
-        if state == "CONDITION_SUCCEEDED":
-            return "done", "Job abgeschlossen.", {"rebuilt": True}
-        if state == "CONDITION_FAILED":
-            return "error", completed.get("message") or "Job fehlgeschlagen.", None
-    # Not yet completed.
-    started = next((c for c in conds if c.get("type") == "Started"), None)
-    if started and started.get("state") == "CONDITION_SUCCEEDED":
-        return "building", "Job läuft …", None
-    return "discovering", "Job wird gestartet …", None
+# ELO computation (refresh + recompute) runs in-process, local/self-host only.
+# The cloud never computes — it serves pre-built ratings uploaded via
+# `scripts/elo/publish.py`. See `_require_local_compute()`.
 
 
 def _read_sim() -> dict | None:
@@ -286,30 +233,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(500, {"error": str(e)})
             return
 
-        # ── ELO smart-refresh status (polled by the UI button) ──
+        # ── ELO smart-refresh status (polled by the UI button, local only) ──
         if self.path.startswith("/api/elo-refresh-status"):
             if not self._require_role("elo_viewer"):
                 return
-            # Cloud mode: if an execution is in-flight, poll the Jobs API and
-            # mirror its state onto our existing status dict so the UI doesn't
-            # care which path produced it.
-            exec_name = _elo_refresh_status.get("execution_name")
-            if (_ELO_JOB_NAME and exec_name
-                    and _elo_refresh_status.get("phase") not in ("done", "error")):
-                try:
-                    exec_doc = _run_job_api(
-                        "GET", f"https://run.googleapis.com/v2/{exec_name}")
-                    phase, message, summary = _job_execution_to_phase(exec_doc)
-                    _elo_refresh_status["phase"] = phase
-                    _elo_refresh_status["message"] = message
-                    if phase in ("done", "error"):
-                        import datetime as _dt
-                        _elo_refresh_status["finished_at"] = _dt.datetime.now().isoformat(timespec="seconds")
-                        if summary is not None and not _elo_refresh_status.get("summary"):
-                            _elo_refresh_status["summary"] = summary
-                except Exception as e:
-                    # Polling failure is non-fatal — keep the last known phase.
-                    _elo_refresh_status["message"] = f"poll error: {e}"
             self._send_json(200, dict(_elo_refresh_status))
             return
 
@@ -391,6 +318,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "error": "forbidden",
             "role": have,
             "required": min_role,
+        })
+        return False
+
+    def _require_local_compute(self) -> bool:
+        """Return True only in local/self-host mode. ELO computation (refresh +
+        recompute) runs on the user's laptop; the cloud only serves pre-built
+        ratings uploaded via `scripts/elo/publish.py`. In cloud mode
+        (auth enabled) these endpoints send 403."""
+        if not _AUTH_ENABLED:
+            return True
+        self._send_json(403, {
+            "error": "ELO-Berechnung ist nur lokal verfügbar. Ratings werden lokal "
+                     "gebaut und per Terminal in die Cloud hochgeladen.",
         })
         return False
 
@@ -560,6 +500,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/elo-recompute":
             if not self._require_role("elo_lab"):
                 return
+            if not self._require_local_compute():
+                return
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
@@ -640,9 +582,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             })
             return
 
-        # ── Smart ELO refresh: cloud → fire Cloud Run Job; local → in-proc thread ──
+        # ── Smart ELO refresh: in-process worker thread (local/self-host only) ──
         if path == "/api/elo-refresh":
             if not self._require_role("elo_lab"):
+                return
+            if not self._require_local_compute():
                 return
             if not _elo_refresh_lock.acquire(blocking=False):
                 self._send_json(409, {
@@ -656,34 +600,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             _elo_refresh_status["finished_at"] = None
             _elo_refresh_status["summary"] = None
 
-            if _ELO_JOB_NAME:
-                # Cloud mode: trigger a Cloud Run Job execution.
-                try:
-                    url = f"https://run.googleapis.com/v2/{_ELO_JOB_NAME}:run"
-                    resp = _run_job_api("POST", url, body={})
-                except Exception as e:
-                    _elo_refresh_lock.release()
-                    import traceback; traceback.print_exc()
-                    self._send_json(500, {"error": f"job trigger failed: {e}"})
-                    return
-                # The :run response is a long-running Operation. The execution
-                # we'll poll lives at metadata.name (operation name has format
-                # "projects/…/jobs/…/executions/…").
-                exec_name = (resp.get("metadata") or {}).get("name") or resp.get("name", "")
-                if exec_name.endswith("/operations/…"):
-                    exec_name = ""
-                _elo_refresh_status["execution_name"] = exec_name
-                _elo_refresh_status["phase"] = "discovering"
-                _elo_refresh_status["message"] = "Job wird gestartet …"
-                _elo_refresh_lock.release()  # the long work happens out-of-process
-                self._send_json(202, {
-                    "ok": True,
-                    "status": dict(_elo_refresh_status),
-                    "hint": "poll GET /api/elo-refresh-status until phase in {done,error}",
-                })
-                return
-
-            # Local mode: spawn in-process worker as before.
             try:
                 from elo import refresh as elo_refresh
             except Exception as e:

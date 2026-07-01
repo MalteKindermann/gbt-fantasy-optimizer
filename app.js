@@ -3873,6 +3873,24 @@ function applyRoleVisibility(role) {
         if (el.classList.contains('tab')) return;
         el.hidden = !roleAtLeast(role, el.getAttribute('data-min-role'));
     });
+    // Cloud mode (SUPABASE_URL set) never computes ELO — ratings are built
+    // locally and uploaded via scripts/elo/publish.py. Hide all compute UI
+    // (Tuning tab, Aktualisieren button, stale banner) regardless of role.
+    // Self-host (no SUPABASE_URL) leaves them visible.
+    if (window.SUPABASE_URL) {
+        document.querySelectorAll('[data-local-only]').forEach(el => {
+            el.hidden = true;
+            const m = (el.getAttribute('onclick') || '').match(/switchTab\('([^']+)'/);
+            const contentId = m && tabIdMap[m[1]];
+            if (contentId) {
+                const pane = document.getElementById(contentId);
+                if (pane) {
+                    if (pane.classList.contains('active')) hidActive = true;
+                    pane.classList.remove('active');
+                }
+            }
+        });
+    }
     if (hidActive) {
         const eloBtn = Array.from(document.querySelectorAll('.tab'))
             .find(b => (b.getAttribute('onclick') || '').includes("switchTab('elo'"));

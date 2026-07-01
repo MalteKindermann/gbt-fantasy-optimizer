@@ -107,7 +107,7 @@
             <div class="tab"        data-min-role="admin"    onclick="switchTab('compare', this)">⚖ Vergleich der Teams</div>
             <div class="tab"        data-min-role="admin"    onclick="switchTab('bracket', this)">🏆 Turnier-Baum</div>
             <div class="tab"        onclick="switchTab('elo',     this)">🏅 ELO Rangliste</div>
-            <div class="tab"        data-min-role="elo_lab"  onclick="switchTab('elotune', this)">🔬 ELO Tuning</div>
+            <div class="tab"        data-min-role="elo_lab"  data-local-only onclick="switchTab('elotune', this)">🔬 ELO Tuning</div>
         </div>
 
         <div id="picksTab" class="tab-content">
@@ -163,13 +163,13 @@
                 </select>
                 <button type="button" class="info-icon" onclick="showModelInfo(document.getElementById('eloModelSelect').value, 'simple')" title="Was rechnet dieses Modell?">i</button>
                 <span id="eloModelStats" class="elo-model-stats"></span>
-                <button id="eloRefreshBtn" class="elo-refresh-btn" data-min-role="elo_lab"
+                <button id="eloRefreshBtn" class="elo-refresh-btn" data-min-role="elo_lab" data-local-only
                         title="Prüft auf neue Matches/Turniere seit dem letzten Build. ⚠ In der Cloud dauert das mehrere Minuten (kein neuer Match: ~6 min; Full-Rebuild bei neuen Turnieren: bis ~30 min). Du kannst das Fenster zwischendurch verlassen.">
                     🔄 Aktualisieren
                 </button>
             </div>
             <div id="eloRefreshBanner" class="elo-refresh-banner" hidden></div>
-            <div id="eloStaleBanner"   class="elo-stale-banner"   hidden data-min-role="elo_lab"></div>
+            <div id="eloStaleBanner"   class="elo-stale-banner"   hidden data-min-role="elo_lab" data-local-only></div>
             <div class="elo-controls">
                 <input type="search" id="eloSearch" class="elo-search"
                        placeholder="🔍 Spieler suchen …" autocomplete="off">
