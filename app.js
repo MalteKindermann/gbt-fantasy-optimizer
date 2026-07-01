@@ -1169,6 +1169,10 @@ function showSliderInfo(key) {
 function _maybeShowStaleBanner(meta) {
     const el = document.getElementById('eloStaleBanner');
     if (!el) return;
+    // Cloud mode never computes ELO — the "neu berechnen" action is local-only,
+    // so a staleness prompt is meaningless there. Ratings are refreshed by the
+    // maintainer via scripts/elo/publish.py.
+    if (window.SUPABASE_URL) { el.hidden = true; return; }
     if (!roleAtLeast(window.USER_ROLE, 'elo_lab')) { el.hidden = true; return; }
     const ts = meta && meta.generated_at;
     if (!ts) { el.hidden = true; return; }
