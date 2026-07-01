@@ -87,7 +87,6 @@ python scripts/elo/build_ratings.py --phase build
 - **Monte-Carlo-Simulation** liefert die Sim-Werte pro Bracket-Position; die Turnierbäume (DVV/ELO/Aktuell/Persönlich) werden daraus im Browser deterministisch abgeleitet
 - **ELO-Subpaket** (`scripts/elo/`) ist ein eigenständiges Ratingsystem und hängt nicht am Fantasy-Optimizer
 
-Eine ausführliche Architektur-Übersicht inkl. Datenfluss, Algorithmen und Konventionen steht in [`CLAUDE.md`](CLAUDE.md).
 
 ## Hosted Version
 
