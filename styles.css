@@ -1155,6 +1155,15 @@ input:focus, select:focus {
     font-family: 'JetBrains Mono', monospace;
 }
 
+.md-rating-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 0.2rem 0;
+}
+.md-rating-row + .md-trace-detail { margin-bottom: 0.35rem; }
+
 .md-tag {
     background: rgba(255,255,255,0.06);
     color: var(--text-dim);

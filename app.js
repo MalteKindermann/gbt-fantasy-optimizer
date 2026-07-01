@@ -1930,6 +1930,7 @@ function openMatchDetail(matchNum) {
                     </div>
                 </div>
 
+                ${renderRatingSection(m)}
                 ${renderH2HSection(m)}
                 ${renderIndividualH2HSection(m)}
                 ${renderTraceSection(m.teamA, m.ptsA, m.traceA)}
@@ -2099,17 +2100,20 @@ async function ensureEloTreeData() {
 function buildTeamRatingMaps(block, eloIndex) {
     const byId = {};
     for (const p of allPlayers) byId[p.id] = p;
-    const dvv = {}, elo = {};
+    const dvv = {}, elo = {}, eloBreak = {};
     for (const t of (block.teams || [])) {
         if (t.dvvPoints != null) dvv[t.name] = t.dvvPoints;
         if (eloIndex) {
+            const comps = [];   // per-player {name, rating|null} for the detail modal
             const ratings = [];
             for (const pid of (t.playerIds || [])) {
                 const p = byId[pid];
                 if (!p) continue;
                 const r = eloIndex[eloIdFromName(p.firstName, p.lastName)];
+                comps.push({ name: p.name, rating: (r != null ? r : null) });
                 if (r != null) ratings.push(r);
             }
+            if (comps.length) eloBreak[t.name] = comps;
             if (ratings.length) elo[t.name] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
         }
     }
@@ -2118,7 +2122,7 @@ function buildTeamRatingMaps(block, eloIndex) {
         if (m.teamA && dvv[m.teamA] == null && m.ptsA != null) dvv[m.teamA] = m.ptsA;
         if (m.teamB && dvv[m.teamB] == null && m.ptsB != null) dvv[m.teamB] = m.ptsB;
     }
-    return { dvv, elo };
+    return { dvv, elo, eloBreak };
 }
 
 // Re-derive the full bracket for one gender + tree. Returns {matchNum: {...}}
@@ -2200,6 +2204,11 @@ function deriveTreeBracket(gender, tree, eloIndex) {
             ptsB: maps ? (maps.dvv[teamB] ?? bm.ptsB) : bm.ptsB,
             traceA: carryBase ? bm.traceA : null,
             traceB: carryBase ? bm.traceB : null,
+            // ELO team rating + per-player breakdown (for the detail modal).
+            eloA: maps ? (maps.elo[teamA] ?? null) : null,
+            eloB: maps ? (maps.elo[teamB] ?? null) : null,
+            eloBreakA: maps ? (maps.eloBreak[teamA] || null) : null,
+            eloBreakB: maps ? (maps.eloBreak[teamB] || null) : null,
         };
     }
     return results;
@@ -2408,6 +2417,53 @@ function renderTraceSection(teamName, totalPts, trace) {
         <div class="md-source-label">${sourceLabels[trace.source] || trace.source}</div>
         <ul class="md-trace">${breakdownHtml}</ul>
     </div>`;
+}
+
+// Rating detail for the ELO / DVV prediction trees: shows each team's rating
+// and — for ELO — how the team value + win probability were computed.
+function renderRatingSection(m) {
+    if (bracketTree === 'dvv') {
+        const a = m.ptsA ?? 0, b = m.ptsB ?? 0;
+        const pct = (a + b) > 0 ? (a / (a + b) * 100).toFixed(1) : '50.0';
+        return `
+        <div class="md-section">
+            <div class="md-section-title">DVV-Punkte</div>
+            <div class="md-rating-row"><span>${escapeHtml(m.teamA)}</span><strong>${a} pts</strong></div>
+            <div class="md-rating-row"><span>${escapeHtml(m.teamB)}</span><strong>${b} pts</strong></div>
+            <div class="md-source-label">Siegwahrscheinlichkeit = ${a}/(${a}+${b}) = <strong>${pct}&nbsp;%</strong> für ${escapeHtml(m.teamA)}</div>
+        </div>`;
+    }
+    if (bracketTree === 'elo') {
+        const model = TREE_LABELS.elo && (_eloTreeModel || 'ensemble');
+        const teamBlock = (name, elo, breakdown) => {
+            if (elo == null) {
+                return `<div class="md-rating-row"><span>${escapeHtml(name)}</span>
+                        <em style="color:var(--warning)">kein ELO-Rating → DVV-Fallback</em></div>`;
+            }
+            const parts = (breakdown || [])
+                .map(c => `${escapeHtml(c.name)}: ${c.rating == null ? '–' : Math.round(c.rating)}`)
+                .join(' · ');
+            return `<div class="md-rating-row"><span>${escapeHtml(name)}</span><strong>Ø ${Math.round(elo)}</strong></div>
+                    <div class="md-trace-detail">Ø der Einzel-ELOs: ${parts}</div>`;
+        };
+        let formula = '';
+        if (m.eloA != null && m.eloB != null) {
+            const pA = (1 / (1 + Math.pow(10, (m.eloB - m.eloA) / 400)) * 100).toFixed(1);
+            formula = `<div class="md-source-label">
+                P(${escapeHtml(m.teamA)}) = 1 / (1 + 10^((${Math.round(m.eloB)} − ${Math.round(m.eloA)}) / 400))
+                = <strong>${pA}&nbsp;%</strong></div>`;
+        } else {
+            formula = `<div class="md-source-label">Mind. ein Team ohne ELO-Rating — Vorhersage über DVV-Punkte-Verhältnis.</div>`;
+        }
+        return `
+        <div class="md-section">
+            <div class="md-section-title">ELO-Rating <span class="md-tag">Modell: ${escapeHtml(model)}</span></div>
+            ${teamBlock(m.teamA, m.eloA, m.eloBreakA)}
+            ${teamBlock(m.teamB, m.eloB, m.eloBreakB)}
+            ${formula}
+        </div>`;
+    }
+    return '';
 }
 
 function renderRefHint(m) {
