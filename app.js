@@ -219,9 +219,18 @@ async function loadPlayerData() {
     // has fn/ln for this id, falling back to players_all.json. Stats (tp/t/mp)
     // are summed across all overlay years.
     const fullRawAll = [];
+    // Overlay-backed players own their name. players_all.json is only an identity
+    // fallback (see above), so a legacy-only id that duplicates an overlay player's
+    // name is a stale duplicate — it must NOT shadow the real, data-carrying id in
+    // name→id resolution (would steal the price and show as a dataless duplicate row,
+    // e.g. two "Kalle Pieper" ids where only the overlay one has stats). Overlay ids
+    // are inserted into allIds first, so they're processed (and claim the name) before
+    // any legacy-only id below.
+    const claimedOverlayNames = new Set();
+    const normNameKey = (fn, ln) => `${fn} ${ln}`.trim().toLowerCase().replace(/\s+/g, ' ');
     for (const id of allIds) {
         // Identity (firstName / lastName / pos / gender / img)
-        let identity = null;
+        let identity = null, fromOverlay = false;
         for (const y of yearsDesc) {
             const ov = overlays.byYear[y][id];
             if (ov && ov.fn && ov.ln) {
@@ -232,6 +241,7 @@ async function loadPlayerData() {
                     gender:    ov.g   || 'M',
                     img:       ov.ip  || '',
                 };
+                fromOverlay = true;
                 break;
             }
         }
@@ -248,6 +258,13 @@ async function loadPlayerData() {
             }
         }
         if (!identity) continue;   // no identity anywhere → skip
+
+        const nameKey = normNameKey(identity.firstName, identity.lastName);
+        if (fromOverlay) {
+            claimedOverlayNames.add(nameKey);
+        } else if (claimedOverlayNames.has(nameKey)) {
+            continue;              // stale legacy-only duplicate of an overlay player
+        }
 
         // Sum stats across all available year overlays
         let tp = 0, t = 0, mp = 0;
