@@ -106,6 +106,7 @@
             <div class="tab"        data-min-role="admin"    onclick="switchTab('picks',   this)">🔒 Meine Picks</div>
             <div class="tab"        data-min-role="admin"    onclick="switchTab('compare', this)">⚖ Vergleich der Teams</div>
             <div class="tab"        data-min-role="admin"    onclick="switchTab('bracket', this)">🏆 Turnier-Baum</div>
+            <div class="tab"        data-min-role="admin"    onclick="switchTab('versus',  this)">🔀 DVV vs ELO</div>
             <div class="tab"        onclick="switchTab('elo',     this)">🏅 ELO Rangliste</div>
             <div class="tab"        data-min-role="elo_lab"  data-local-only onclick="switchTab('elotune', this)">🔬 ELO Tuning</div>
         </div>
@@ -156,6 +157,33 @@
             </div>
             <div id="bracketView">
                 <div class="no-results">Lade Bracket-Vorhersage…</div>
+            </div>
+        </div>
+
+        <div id="versusTab" class="tab-content">
+            <p class="tab-hint">
+                Vergleich der offiziellen DVV-Setzliste mit der ELO-Rangschätzung für das
+                aktuelle Turnier. Die ELO-Rangliste sortiert dieselben Teams nach ihrem
+                ELO-Rating; das Abzeichen zeigt die Verschiebung gegenüber der Setzung:
+                <span class="versus-delta delta-up">+x</span> = ELO stuft das Team höher ein
+                als gesetzt, <span class="versus-delta delta-down">−x</span> = niedriger.
+            </p>
+            <div class="bracket-controls">
+                <div class="bracket-gender-toggle" id="versusGenderToggle">
+                    <button class="filter-pill active" data-bg="m">♂ Männer</button>
+                    <button class="filter-pill" data-bg="f">♀ Frauen</button>
+                </div>
+                <label class="bracket-tree-label">Modell:
+                    <select id="versusModelSelect" class="elo-model-select" onchange="setVersusModel(this.value)">
+                        <option value="elo">ELO (klassisch)</option>
+                        <option value="glicko2">Glicko-2</option>
+                        <option value="trueskill">TrueSkill</option>
+                        <option value="ensemble">Ensemble</option>
+                    </select>
+                </label>
+            </div>
+            <div id="versusView">
+                <div class="no-results">Lade Turnierdaten…</div>
             </div>
         </div>
 

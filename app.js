@@ -375,6 +375,8 @@ async function loadSimFile() {
         // newly-loaded bracket instead of the "wird berechnet…" placeholder.
         const bracketTab = document.getElementById('bracketTab');
         if (bracketTab && bracketTab.classList.contains('active')) renderBracket();
+        const versusTab = document.getElementById('versusTab');
+        if (versusTab && versusTab.classList.contains('active')) renderVersus();
         return true;
     } catch (_) { return false; }
 }
@@ -955,6 +957,7 @@ function switchTab(tab, el) {
     else if (tab === 'picks')   renderPicksTab();
     else if (tab === 'compare') renderCompare();
     else if (tab === 'bracket') renderBracket();
+    else if (tab === 'versus')  renderVersus();
     else if (tab === 'elo')     renderEloRanking();
     else if (tab === 'elotune') renderEloTuning();
 }
@@ -1685,6 +1688,136 @@ function setEloTreeModel(model) {
     ensureEloTreeData().finally(() => renderBracket());
 }
 
+// ── DVV vs ELO tab: seed-vs-ELO ranking comparison for the current tournament ──
+let versusGender = 'm';
+let _versusModel = localStorage.getItem('versusModel') || 'ensemble';
+
+function setVersusGender(g) {
+    versusGender = g;
+    renderVersus();
+}
+function setVersusModel(model) {
+    _versusModel = model;
+    localStorage.setItem('versusModel', model);
+    renderVersus();
+}
+
+// Actual tournament seeding: [{seed, team}] sorted by seed. Derived from the
+// bracket-prediction seed refs (S1..Sn → team). Falls back to the teams[] array
+// (already seed-ordered) when seed refs aren't present (non-8-team / qualifier draws).
+function seedSlotsFor(block) {
+    const seen = {}, slots = [];
+    for (const m of (block?.bracketPrediction || [])) {
+        for (const [ref, team] of [[m.refA, m.teamA], [m.refB, m.teamB]]) {
+            if (ref && ref[0] === 'S' && team && team !== 'TBD' && !(ref in seen)) {
+                const seed = parseInt(ref.slice(1), 10);
+                if (!isNaN(seed)) { seen[ref] = true; slots.push({ seed, team }); }
+            }
+        }
+    }
+    if (slots.length) return slots.sort((a, b) => a.seed - b.seed);
+    return (block?.teams || []).map((t, i) => ({ seed: i + 1, team: t.name }));
+}
+
+async function renderVersus() {
+    const view = document.getElementById('versusView');
+    if (!view) return;
+    // Keep controls in sync with state.
+    const modelSel = document.getElementById('versusModelSelect');
+    if (modelSel) modelSel.value = _versusModel;
+    document.querySelectorAll('#versusGenderToggle .filter-pill').forEach(b => {
+        b.classList.toggle('active', b.dataset.bg === versusGender);
+    });
+
+    // This comparison only needs the sim file (teams + bracket seeds). If it isn't in
+    // memory yet, load whatever exists on disk right away — independent of the bracket /
+    // "Team optimieren" flow, so the tab works standalone on first open.
+    if (!tournamentSim || !tournamentSim.byGender) {
+        await loadSimFile();
+    }
+    if (!tournamentSim || !tournamentSim.byGender) {
+        const banner = document.getElementById('simBanner');
+        const loading = banner && banner.dataset.mode === 'loading';
+        view.innerHTML = loading
+            ? '<div class="no-results"><span class="sim-spinner"></span> Turnierdaten werden berechnet…</div>'
+            : '<div class="no-results">Keine Sim-Daten geladen.</div>';
+        return;
+    }
+    const block = tournamentSim.byGender[versusGender];
+    if (!block || !block.bracketPrediction || block.bracketPrediction.length === 0) {
+        view.innerHTML = `<div class="no-results">Keine Turnierdaten für ${versusGender === 'm' ? 'Männer' : 'Frauen'}.</div>`;
+        return;
+    }
+
+    const seeds = seedSlotsFor(block);
+    if (!seeds.length) {
+        view.innerHTML = '<div class="no-results">Keine Setzliste verfügbar.</div>';
+        return;
+    }
+
+    // ELO index for the selected model (best-effort — null if the JSON can't load).
+    const eloIndex = await ensureEloTreeData(_versusModel);
+    const maps = buildTeamRatingMaps(block, eloIndex);   // {dvv, elo, eloBreak}
+
+    // Rank the seeded teams by ELO desc; teams without ELO sink to the bottom (no delta).
+    const withElo = seeds.filter(s => maps.elo[s.team] != null)
+                         .sort((a, b) => maps.elo[b.team] - maps.elo[a.team]);
+    const withoutElo = seeds.filter(s => maps.elo[s.team] == null);
+    const eloRankOf = {};
+    withElo.forEach((s, i) => { eloRankOf[s.team] = i + 1; });
+
+    const modelLabel = { elo: 'ELO (klassisch)', glicko2: 'Glicko-2',
+                         trueskill: 'TrueSkill', ensemble: 'Ensemble' }[_versusModel] || _versusModel;
+    const metaLine = `${block.tournamentName ?? '?'} · ${versusGender === 'm' ? 'Männer' : 'Frauen'} · Modell: ${modelLabel}`;
+
+    const leftRows = seeds.map(s => {
+        const pts = maps.dvv[s.team];
+        return `<div class="versus-row">
+            <span class="versus-rank">${s.seed}</span>
+            <span class="versus-team">${_escapeHtml(s.team)}</span>
+            <span class="versus-metric">${pts != null ? Math.round(pts) : '—'}</span>
+        </div>`;
+    }).join('');
+
+    const eloRows = withElo.map(s => {
+        const delta = s.seed - eloRankOf[s.team];        // + = ELO ranks higher than seed
+        const cls = delta > 0 ? 'delta-up' : (delta < 0 ? 'delta-down' : 'delta-flat');
+        const txt = delta > 0 ? `+${delta}` : (delta < 0 ? `${delta}` : '±0');
+        const tip = (maps.eloBreak[s.team] || [])
+            .map(c => `${c.name}: ${c.rating != null ? Math.round(c.rating) : 'k.A.'}`).join(' · ');
+        return `<div class="versus-row" title="${_escapeHtml(tip)}">
+            <span class="versus-rank">${eloRankOf[s.team]}</span>
+            <span class="versus-team">${_escapeHtml(s.team)}</span>
+            <span class="versus-metric">${Math.round(maps.elo[s.team])}</span>
+            <span class="versus-delta ${cls}">${txt}</span>
+        </div>`;
+    }).join('');
+    const missingRows = withoutElo.map(s => `<div class="versus-row versus-row-muted">
+            <span class="versus-rank">–</span>
+            <span class="versus-team">${_escapeHtml(s.team)}</span>
+            <span class="versus-metric">—</span>
+            <span class="versus-delta delta-flat" title="Kein ELO-Rating verfügbar">—</span>
+        </div>`).join('');
+
+    const eloAvailable = eloIndex && withElo.length > 0;
+    const rightBody = eloAvailable
+        ? eloRows + missingRows
+        : '<div class="no-results">ELO-Daten für dieses Modell nicht verfügbar.</div>';
+
+    view.innerHTML = `
+        <div class="versus-meta">${_escapeHtml(metaLine)}</div>
+        <div class="versus-cols">
+            <div class="versus-col">
+                <div class="versus-col-head">📊 DVV-Setzliste</div>
+                ${leftRows}
+            </div>
+            <div class="versus-col">
+                <div class="versus-col-head">🏅 ELO-Rangliste</div>
+                ${rightBody}
+            </div>
+        </div>`;
+}
+
 function renderBracket() {
     const view = document.getElementById('bracketView');
     // Keep the selector controls in sync with state.
@@ -2074,9 +2207,12 @@ function eloIdFromName(first, last) {
 
 // Fetch the selected ELO model JSON (reusing the ranking-tab cache) and build a
 // name→rating index. Best-effort: on failure the ELO tree is simply unavailable.
-async function ensureEloTreeData() {
-    const model = _eloTreeModel;
-    if (_eloTreeIndexModel === model && _eloTreeIndex) return _eloTreeIndex;
+async function ensureEloTreeData(model = _eloTreeModel) {
+    // Fast path only for the bracket-tab's own selected model (whose index is cached
+    // in the module globals). Other callers (e.g. the DVV-vs-ELO tab) may request a
+    // different model — we build a fresh index for them WITHOUT touching those globals.
+    const isDefault = (model === _eloTreeModel);
+    if (isDefault && _eloTreeIndexModel === model && _eloTreeIndex) return _eloTreeIndex;
     let data = _eloDataByModel[model];
     if (!data) {
         try {
@@ -2084,14 +2220,16 @@ async function ensureEloTreeData() {
             if (!r.ok) throw new Error(r.status);
             data = await r.json();
             _eloDataByModel[model] = data;
-        } catch { _eloTreeIndex = null; _eloTreeIndexModel = model; return null; }
+        } catch {
+            if (isDefault) { _eloTreeIndex = null; _eloTreeIndexModel = model; }
+            return null;
+        }
     }
     const idx = {};
     for (const pl of (data.players || [])) {
         if (pl.id != null && pl.elo_combined != null) idx[pl.id] = pl.elo_combined;
     }
-    _eloTreeIndex = idx;
-    _eloTreeIndexModel = model;
+    if (isDefault) { _eloTreeIndex = idx; _eloTreeIndexModel = model; }
     return idx;
 }
 
@@ -4174,8 +4312,15 @@ function initBracketGenderToggle() {
     });
 }
 
+function initVersusGenderToggle() {
+    document.querySelectorAll('#versusGenderToggle .filter-pill').forEach(b => {
+        b.addEventListener('click', () => setVersusGender(b.dataset.bg));
+    });
+}
+
 initPlayerFilters();
 initBracketGenderToggle();
+initVersusGenderToggle();
 
 // ── App start: bypass login when Supabase isn't configured (Self-Host) ──
 function _startApp(session) {

@@ -2427,3 +2427,73 @@ input:focus, select:focus {
     font-size: 0.85rem;
     text-align: center;
 }
+
+/* ── DVV vs ELO comparison tab ─────────────────────────────────────────────── */
+.versus-meta {
+    color: var(--text-dim);
+    font-size: 0.85rem;
+    margin-bottom: 0.9rem;
+}
+.versus-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+@media (max-width: 640px) {
+    .versus-cols { grid-template-columns: 1fr; }
+}
+.versus-col {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.6rem 0.75rem 0.75rem;
+}
+.versus-col-head {
+    font-weight: 700;
+    color: var(--accent);
+    padding: 0.25rem 0.35rem 0.55rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 0.35rem;
+}
+.versus-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.45rem 0.35rem;
+    border-bottom: 1px solid var(--border);
+}
+.versus-row:last-child { border-bottom: none; }
+.versus-row-muted { opacity: 0.55; }
+.versus-rank {
+    flex: 0 0 1.6rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    color: var(--text-dim);
+}
+.versus-team {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.versus-metric {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+}
+.versus-delta {
+    flex: 0 0 auto;
+    min-width: 2.4rem;
+    text-align: center;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.85rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 6px;
+}
+.versus-delta.delta-up   { color: var(--success); background: rgba(0, 255, 136, 0.12); }
+.versus-delta.delta-down { color: var(--danger);  background: rgba(255, 77, 77, 0.12); }
+.versus-delta.delta-flat { color: var(--text-dim); background: transparent; }
