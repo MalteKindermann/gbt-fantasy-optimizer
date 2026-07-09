@@ -97,6 +97,11 @@ def season_years() -> list[int]:
 # ── TTLs ──────────────────────────────────────────────────────────────────────
 SNAPSHOT_TTL_SECONDS = 600   # 10 min — Preise ändern sich relativ selten
 ID_TOKEN_TTL_SECONDS = 50 * 60   # 50 min, kleiner als Firebase's 60-min Gültigkeit
+# GBT finalisiert/korrigiert Fantasy-Punkte teils noch Tage nach Turnierende.
+# Turniere, die vor weniger als so vielen Tagen endeten, werden NICHT ewig
+# gecacht (sonst friert eine vorläufige Wertung dauerhaft ein) — sie laufen
+# über die kurze SNAPSHOT-TTL und aktualisieren sich damit von selbst.
+STATS_FINALISE_DAYS = 30
 
 # In-Memory Cache für ID-Token (überlebt nur den laufenden Prozess)
 _id_token_cache: dict[str, Any] = {"token": None, "expires_at": 0}
@@ -484,20 +489,33 @@ def _season_tournaments(docs: list[dict], year: int) -> list[dict]:
 
 
 def fetch_tournament_stats(id_token: str, tournament_id: str,
-                            completed: bool, force: bool = False
-                            ) -> dict[str, dict] | None:
+                            completed: bool, force: bool = False,
+                            date_end: str = "") -> dict[str, dict] | None:
     """Holt tournaments/<tid>/stats und gibt {playerId: statsDict} zurück.
 
-    Cache-Policy: abgeschlossene Turniere werden ewig gecacht (TTL=∞),
-    laufende/anstehende für 10 min. Returns None bei Fetch-Fehler.
+    Cache-Policy: LÄNGST abgeschlossene Turniere werden ewig gecacht (TTL=∞).
+    Kürzlich beendete (< STATS_FINALISE_DAYS) sowie laufende/anstehende laufen
+    über die 10-min-TTL — GBT kann Fantasy-Punkte noch Tage nach Turnierende
+    korrigieren, und eine ewig eingefrorene vorläufige Wertung wäre falsch.
+    Returns None bei Fetch-Fehler.
     """
+    # "frozen" = darf ewig gecacht werden. Nur wenn das Turnier abgeschlossen ist
+    # UND lange genug her (oder wir das Enddatum nicht kennen — dann wie bisher).
+    frozen = completed
+    if completed and date_end:
+        try:
+            end = datetime.date.fromisoformat(date_end[:10])
+            if (datetime.date.today() - end).days < STATS_FINALISE_DAYS:
+                frozen = False
+        except Exception:
+            pass
     cache_path = CACHE_DIR / f"tournament_stats_{tournament_id}.json"
     if not force and cache_path.exists():
         try:
             with open(cache_path, encoding="utf-8") as f:
                 entry = json.load(f)
             age = time.time() - entry.get("fetched_at", 0)
-            if completed or age < SNAPSHOT_TTL_SECONDS:
+            if frozen or age < SNAPSHOT_TTL_SECONDS:
                 return entry["data"]
         except Exception:
             pass   # fall through to refetch
@@ -573,7 +591,8 @@ def build_player_history(id_token: str, years: list[int] | int,
             if t["id"] in seen_ids:
                 continue
             seen_ids.add(t["id"])
-            stats = fetch_tournament_stats(id_token, t["id"], t["completed"], force=force)
+            stats = fetch_tournament_stats(id_token, t["id"], t["completed"],
+                                           force=force, date_end=t.get("dateEnd", ""))
             if not stats:
                 skipped += 1
                 continue
