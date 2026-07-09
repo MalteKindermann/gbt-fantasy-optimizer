@@ -327,26 +327,13 @@ async function loadPlayerData() {
                    + `(${fullRawAll.length} Spieler total)`);
     }
 
-    // Prefer per-tournament history for tp/t/mp so the displayed SAISON-PTS /
-    // Ø-TURNIER / TURNIERE (and the derived Ø/Match, Pkt/₡, Optimal-Score) match
-    // the tournament-history table exactly. The Firestore `season_stats` aggregate
-    // can over-count the running season (it includes a tournament that has no
-    // per-tournament `/stats` record yet), which made Ø/Turnier disagree with the
-    // history the user actually sees. player_history only holds completed
-    // tournaments with real stats, so it's the consistent source of truth. Players
-    // absent from history keep their season_stats aggregate (best we have).
-    const hist = window.playerHistory || {};
-    const fromHistory = (p) => {
-        const recs = (hist[p.id] || []).filter(r => r.fantasyPoints != null);
-        if (!recs.length) return p;
-        return {
-            ...p,
-            tp: recs.reduce((s, r) => s + (r.fantasyPoints || 0), 0),
-            t:  recs.length,
-            mp: recs.reduce((s, r) => s + (r.matches || 0), 0),
-        };
-    };
-    allPlayers = fullRawAll.map(p => buildPlayer(fromHistory(p), priceMap.get(p.id) ?? null));
+    // tp/t/mp come from the Firestore `season_stats` aggregate — it is the COMPLETE,
+    // authoritative total. Do NOT re-derive these from player_history: the per-tournament
+    // `tournaments/<id>/stats` subcollection is occasionally empty for a real, completed
+    // tournament (e.g. Düsseldorf 2 2026 has 0 stats docs yet is scored in season_stats),
+    // so history would UNDER-count. The history table reconciles that gap visually instead
+    // (see renderHistoryTable) so Ø/Turnier and the table still add up.
+    allPlayers = fullRawAll.map(p => buildPlayer(p, priceMap.get(p.id) ?? null));
     availablePlayers = allPlayers.filter(p => p.price !== null && p.price > 0);
     computePoolEstimates(availablePlayers);
     // History-derived metrics — constant per player, so compute once at load.
@@ -3835,7 +3822,7 @@ function renderHistoryTable(playerId, wrap = true) {
     if (!hist || hist.length === 0) return '';
     const ordered = hist.slice().reverse();   // newest first
     let lastYear = null;
-    const rows = ordered.map(e => {
+    let rows = ordered.map(e => {
         const year = (e.dateEnd || '').slice(0, 4) || '?';
         const fp = e.fantasyPoints != null ? Number(e.fantasyPoints).toFixed(1) : '–';
         let header = '';
@@ -3850,6 +3837,31 @@ function renderHistoryTable(playerId, wrap = true) {
             <td class="why-row-val">${e.matches ?? '–'}</td>
         </tr>`;
     }).join('');
+
+    // Reconcile against the season_stats totals: some completed tournaments have no
+    // per-tournament `/stats` in Firestore (e.g. Düsseldorf 2 2026), so they never make
+    // it into player_history — but they ARE counted in the player's tp/t/mp aggregate.
+    // Surface that gap as a muted row so the table sums to the same Ø/Turnier the card
+    // shows, instead of silently listing fewer tournaments than the average is based on.
+    const p = (allPlayers || []).find(x => x.id === playerId);
+    let shownCount = hist.length;
+    if (p && p.t > hist.length) {
+        const histPts     = hist.reduce((s, e) => s + (e.fantasyPoints || 0), 0);
+        const histMatches = hist.reduce((s, e) => s + (e.matches || 0), 0);
+        const missT  = p.t  - hist.length;
+        const missPts = p.tp - histPts;
+        const missMp  = p.mp - histMatches;
+        if (missPts > 0.5) {
+            shownCount = p.t;
+            rows += `<tr class="why-history-missing" title="Von der offiziellen Saisonwertung gezählt, aber ohne Einzel-Turnierdaten in Firestore — daher ohne Details. Fließt in Ø/Turnier ein.">
+                <td>${missT} Turnier${missT !== 1 ? 'e' : ''} ohne Detaildaten</td>
+                <td class="why-row-val">—</td>
+                <td class="why-row-val"><strong>${missPts.toFixed(1)}</strong></td>
+                <td class="why-row-val">${missMp > 0 ? missMp : '–'}</td>
+            </tr>`;
+        }
+    }
+
     const table = `
         <table class="why-stats why-history">
             <thead>
@@ -3860,7 +3872,7 @@ function renderHistoryTable(playerId, wrap = true) {
     if (!wrap) return table;
     return `
         <div class="md-section">
-            <div class="md-section-title">📅 Turnier-Historie (${hist.length})</div>
+            <div class="md-section-title">📅 Turnier-Historie (${shownCount})</div>
             ${table}
         </div>`;
 }

@@ -1474,6 +1474,12 @@ input:focus, select:focus {
     border-bottom: 1px solid rgba(255,255,255,0.12);
     background: rgba(255,255,255,0.02);
 }
+.why-history-missing td {
+    color: var(--text-dim);
+    font-style: italic;
+    background: rgba(255,255,255,0.02);
+    border-top: 1px dashed rgba(255,255,255,0.15);
+}
 .h2h-history-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
