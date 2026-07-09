@@ -287,15 +287,39 @@ async function loadPlayerData() {
 
     const priceMap = new Map();
     const unknown = [];
+    const synthRaw = [];              // priced entries with no roster identity → synthesize
+    const seenSynth = new Set();
     rawAvail.forEach(a => {
         if (a.id) {
             priceMap.set(a.id, a.price);
-        } else if (a.name) {
-            const id = nameToId.get(norm(a.name));
-            if (id) priceMap.set(id, a.price);
-            else    unknown.push(a.name);
+            return;
+        }
+        if (!a.name) return;
+        const id = nameToId.get(norm(a.name));
+        if (id) { priceMap.set(id, a.price); return; }
+        // No roster identity. If the entry carries a real price, synthesize a minimal
+        // record so the player is still visible / pickable / lockable — international
+        // teams and rookies that aren't in the German Firestore roster but ARE in the
+        // tournament (with a Firestore price). Otherwise flag as unknown (pending).
+        if (a.price != null && a.price > 0) {
+            const parts = a.name.trim().split(/\s+/);
+            const firstName = parts.length > 1 ? parts[0] : '';
+            const lastName  = parts.length > 1 ? parts.slice(1).join(' ') : a.name.trim();
+            const sid = 'syn_' + norm(a.name).replace(/\s+/g, '_');
+            if (seenSynth.has(sid)) return;
+            seenSynth.add(sid);
+            synthRaw.push({
+                id: sid, firstName, lastName, pos: 'Hybrid',
+                gender: inferGenderFromSim(lastName) || 'M',
+                tp: 0, t: 0, mp: 0, img: '',
+            });
+            priceMap.set(sid, a.price);
+        } else {
+            unknown.push(a.name);
         }
     });
+    // Append the synthesized players to the roster so buildPlayer picks them up.
+    for (const s of synthRaw) fullRawAll.push(s);
 
     if (unknown.length) console.warn('players_available.json: Unbekannte Spieler:', unknown);
     if (overlays.years.length) {
@@ -913,6 +937,23 @@ function applySimData() {
             ? p.expectedPoints / p.price
             : null;
     });
+}
+
+// Infer a player's gender ('M'/'W') from the current tournament brackets by matching
+// their surname against the seeded team names. Returns null when the sim isn't loaded
+// yet or the surname isn't found (caller falls back to a default).
+function inferGenderFromSim(lastName) {
+    const nl = String(lastName || '').trim().toLowerCase();
+    if (!nl || !tournamentSim || !tournamentSim.byGender) return null;
+    for (const g of ['m', 'f']) {
+        const b = tournamentSim.byGender[g];
+        for (const t of (b?.teams || [])) {
+            for (const part of String(t.name || '').split(' - ')) {
+                if (part.trim().toLowerCase() === nl) return g === 'f' ? 'W' : 'M';
+            }
+        }
+    }
+    return null;
 }
 
 function buildPlayer(raw, price) {
