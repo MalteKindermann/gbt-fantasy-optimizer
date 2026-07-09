@@ -2243,14 +2243,14 @@ async function ensureEloTreeData(model = _eloTreeModel) {
         }
     }
     const idx = {};
-    const byLast = {};   // surname → [{rating, gender, matches, last_active}] for the fallback
+    const byLast = {};   // surname → [{name, rating, gender, matches, last_active}] for the fallback
     for (const pl of (data.players || [])) {
         if (pl.id == null || pl.elo_combined == null) continue;
         idx[pl.id] = pl.elo_combined;
         const us = String(pl.id).indexOf('_');   // id is "{last}_{first}", last has no underscore
         const last = us >= 0 ? String(pl.id).slice(0, us) : String(pl.id);
         (byLast[last] = byLast[last] || []).push({
-            rating: pl.elo_combined, gender: pl.gender || null,
+            name: pl.name || null, rating: pl.elo_combined, gender: pl.gender || null,
             matches: pl.matches || 0, last_active: pl.last_active || '',
         });
     }
@@ -2279,6 +2279,26 @@ function buildTeamRatingMaps(block, eloIndex, gender = null) {
             if (g.length) cands = g;
         }
         return cands;
+    };
+    // Surname variants to try, full name first, then hyphen/space components (≥3 chars).
+    // The DVV Setzliste sometimes carries double-barrelled surnames ("Chouikh-Barbez")
+    // where the ELO dataset (FIVB) only lists one component ("Chouikh").
+    const surnameVariants = (nl) => {
+        const keys = [nl];
+        for (const part of nl.split(/[-\s]+/)) if (part.length >= 3 && part !== nl) keys.push(part);
+        return keys;
+    };
+    // Best candidate list of exactly `need` players for a surname, or null. Tries each
+    // variant; accepts a variant when its full (or active-only) candidate set matches `need`.
+    const pickForSurname = (nl, need) => {
+        for (const key of surnameVariants(nl)) {
+            const cands = candsFor(key);
+            if (!cands.length) continue;
+            if (cands.length === need) return cands;
+            const active = cands.filter(c => c.last_active >= '2025' && c.matches >= 20);
+            if (active.length === need) return active;
+        }
+        return null;
     };
     const dvv = {}, elo = {}, eloBreak = {};
     for (const t of (block.teams || [])) {
@@ -2313,13 +2333,7 @@ function buildTeamRatingMaps(block, eloIndex, gender = null) {
         const needBy = {};
         for (const s of slots) if (s.rating == null) (needBy[s.last] = needBy[s.last] || []).push(s);
         for (const nl in needBy) {
-            const need = needBy[nl].length;
-            const cands = candsFor(nl);
-            let pick = (cands.length === need) ? cands : null;
-            if (!pick) {
-                const active = cands.filter(c => c.last_active >= '2025' && c.matches >= 20);
-                if (active.length === need) pick = active;
-            }
+            const pick = pickForSurname(nl, needBy[nl].length);
             if (pick) needBy[nl].forEach((s, i) => {
                 s.rating = pick[i].rating;
                 if (!s.first && pick[i].name) s.name = pick[i].name;   // enrich bare surname → full name
