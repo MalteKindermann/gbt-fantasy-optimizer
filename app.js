@@ -1774,7 +1774,7 @@ async function renderVersus() {
 
     // ELO index for the selected model (best-effort — null if the JSON can't load).
     const eloIndex = await ensureEloTreeData(_versusModel);
-    const maps = buildTeamRatingMaps(block, eloIndex);   // {dvv, elo, eloBreak}
+    const maps = buildTeamRatingMaps(block, eloIndex, versusGender);   // {dvv, elo, eloBreak}
 
     // Rank the seeded teams by ELO desc; teams without ELO sink to the bottom (no delta).
     const withElo = seeds.filter(s => maps.elo[s.team] != null)
@@ -2243,34 +2243,92 @@ async function ensureEloTreeData(model = _eloTreeModel) {
         }
     }
     const idx = {};
+    const byLast = {};   // surname → [{rating, gender, matches, last_active}] for the fallback
     for (const pl of (data.players || [])) {
-        if (pl.id != null && pl.elo_combined != null) idx[pl.id] = pl.elo_combined;
+        if (pl.id == null || pl.elo_combined == null) continue;
+        idx[pl.id] = pl.elo_combined;
+        const us = String(pl.id).indexOf('_');   // id is "{last}_{first}", last has no underscore
+        const last = us >= 0 ? String(pl.id).slice(0, us) : String(pl.id);
+        (byLast[last] = byLast[last] || []).push({
+            rating: pl.elo_combined, gender: pl.gender || null,
+            matches: pl.matches || 0, last_active: pl.last_active || '',
+        });
     }
+    // Attach the surname index non-enumerably so key-iteration / lookups on idx stay unaffected.
+    Object.defineProperty(idx, '__byLast', { value: byLast, enumerable: false });
     if (isDefault) { _eloTreeIndex = idx; _eloTreeIndexModel = model; }
     return idx;
 }
 
 // Per-team rating lookups for a gender block.
 // dvv: team-name → DVV points; elo: team-name → mean elo_combined (absent = unmapped).
-function buildTeamRatingMaps(block, eloIndex) {
+function buildTeamRatingMaps(block, eloIndex, gender = null) {
     const byId = {};
     for (const p of allPlayers) byId[p.id] = p;
+    // Surname fallback for international players. They aren't in the Firestore roster
+    // (allPlayers), so their bracket slots can't be resolved via playerIds — but the ELO
+    // dataset (FIVB/bvb) usually still holds them. `__byLast` (attached by ensureEloTreeData)
+    // maps surname → candidate records; we resolve a slot only when it's unambiguous.
+    const eloByLast = (eloIndex && eloIndex.__byLast) || {};
+    const bg = gender || block.gender || null;   // 'm' | 'f' | null
+    // Gender-narrowed candidate list for a surname (already normalised key).
+    const candsFor = (nl) => {
+        let cands = eloByLast[nl] || [];
+        if (bg && cands.some(c => c.gender)) {
+            const g = cands.filter(c => !c.gender || c.gender === bg);
+            if (g.length) cands = g;
+        }
+        return cands;
+    };
     const dvv = {}, elo = {}, eloBreak = {};
     for (const t of (block.teams || [])) {
         if (t.dvvPoints != null) dvv[t.name] = t.dvvPoints;
-        if (eloIndex) {
-            const comps = [];   // per-player {name, rating|null} for the detail modal
-            const ratings = [];
-            for (const pid of (t.playerIds || [])) {
-                const p = byId[pid];
-                if (!p) continue;
-                const r = eloIndex[eloIdFromName(p.firstName, p.lastName)];
-                comps.push({ name: p.name, rating: (r != null ? r : null) });
-                if (r != null) ratings.push(r);
-            }
-            if (comps.length) eloBreak[t.name] = comps;
-            if (ratings.length) elo[t.name] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
+        if (!eloIndex) continue;
+        // Build the team's two slots: prefer Firestore-roster identities (have first+last),
+        // otherwise fall back to the surnames parsed from the team name ("LastA - LastB").
+        const slots = [];
+        const covered = {};   // normLast → how many roster slots already took it
+        for (const pid of (t.playerIds || [])) {
+            const p = byId[pid];
+            if (!p) continue;
+            const nl = _normName(p.lastName);
+            slots.push({ name: p.name, last: nl, first: p.firstName, rating: null });
+            covered[nl] = (covered[nl] || 0) + 1;
         }
+        for (const raw of String(t.name || '').split(' - ')) {
+            const last = raw.trim(); if (!last) continue;
+            const nl = _normName(last);
+            if (covered[nl]) { covered[nl]--; continue; }   // roster already accounts for it
+            slots.push({ name: last, last: nl, first: null, rating: null });
+        }
+        // Pass 1: exact "{last}_{first}" id for roster slots.
+        for (const s of slots) {
+            if (s.first) { const r = eloIndex[eloIdFromName(s.first, s.last)]; if (r != null) s.rating = r; }
+        }
+        // Pass 2: surname fallback for international / rookie slots (no Firestore identity or
+        // an exact-id miss). Count-aware: assign only when the number of plausible candidates
+        // for a surname exactly matches the number of still-unresolved slots needing it — this
+        // resolves unique surnames AND same-surname pairs (e.g. "Klinger - Klinger" → both
+        // active female Klingers), while staying blank when it's genuinely ambiguous.
+        const needBy = {};
+        for (const s of slots) if (s.rating == null) (needBy[s.last] = needBy[s.last] || []).push(s);
+        for (const nl in needBy) {
+            const need = needBy[nl].length;
+            const cands = candsFor(nl);
+            let pick = (cands.length === need) ? cands : null;
+            if (!pick) {
+                const active = cands.filter(c => c.last_active >= '2025' && c.matches >= 20);
+                if (active.length === need) pick = active;
+            }
+            if (pick) needBy[nl].forEach((s, i) => {
+                s.rating = pick[i].rating;
+                if (!s.first && pick[i].name) s.name = pick[i].name;   // enrich bare surname → full name
+            });
+        }
+        const comps = slots.map(s => ({ name: s.name, rating: s.rating }));
+        const ratings = slots.filter(s => s.rating != null).map(s => s.rating);
+        if (comps.length) eloBreak[t.name] = comps;
+        if (ratings.length) elo[t.name] = ratings.reduce((a, b) => a + b, 0) / ratings.length;
     }
     // Fill any DVV gaps from the match points fields.
     for (const m of (block.bracketPrediction || [])) {
@@ -2288,7 +2346,7 @@ function deriveTreeBracket(gender, tree, eloIndex) {
     const base = [...block.bracketPrediction].sort((a, b) => a.match - b.match);
     const overrides = (tree === 'personal') ? getManualOverridesFor(gender) : {};
     const useRatings = (tree === 'dvv' || tree === 'elo');
-    const maps = useRatings ? buildTeamRatingMaps(block, eloIndex) : null;
+    const maps = useRatings ? buildTeamRatingMaps(block, eloIndex, gender) : null;
 
     const seedSlots = {};
     for (const m of base) {
@@ -2452,7 +2510,7 @@ function treeAvailable(tree, eloIndex) {
         return ['m', 'f'].some(g => {
             const b = tournamentSim.byGender[g];
             if (!b?.teams) return false;
-            return Object.keys(buildTeamRatingMaps(b, eloIndex).elo).length > 0;
+            return Object.keys(buildTeamRatingMaps(b, eloIndex, g).elo).length > 0;
         });
     }
     return true; // current, dvv
