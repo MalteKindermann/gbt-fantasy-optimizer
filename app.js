@@ -327,7 +327,26 @@ async function loadPlayerData() {
                    + `(${fullRawAll.length} Spieler total)`);
     }
 
-    allPlayers = fullRawAll.map(p => buildPlayer(p, priceMap.get(p.id) ?? null));
+    // Prefer per-tournament history for tp/t/mp so the displayed SAISON-PTS /
+    // Ø-TURNIER / TURNIERE (and the derived Ø/Match, Pkt/₡, Optimal-Score) match
+    // the tournament-history table exactly. The Firestore `season_stats` aggregate
+    // can over-count the running season (it includes a tournament that has no
+    // per-tournament `/stats` record yet), which made Ø/Turnier disagree with the
+    // history the user actually sees. player_history only holds completed
+    // tournaments with real stats, so it's the consistent source of truth. Players
+    // absent from history keep their season_stats aggregate (best we have).
+    const hist = window.playerHistory || {};
+    const fromHistory = (p) => {
+        const recs = (hist[p.id] || []).filter(r => r.fantasyPoints != null);
+        if (!recs.length) return p;
+        return {
+            ...p,
+            tp: recs.reduce((s, r) => s + (r.fantasyPoints || 0), 0),
+            t:  recs.length,
+            mp: recs.reduce((s, r) => s + (r.matches || 0), 0),
+        };
+    };
+    allPlayers = fullRawAll.map(p => buildPlayer(fromHistory(p), priceMap.get(p.id) ?? null));
     availablePlayers = allPlayers.filter(p => p.price !== null && p.price > 0);
     computePoolEstimates(availablePlayers);
     // History-derived metrics — constant per player, so compute once at load.
