@@ -1234,6 +1234,15 @@ def map_teams_to_players(bracket_teams: list[str], players: list[dict],
             # Prefer the Firestore-narrowed pool; only fall back to the full
             # pool if narrowing leaves zero candidates (stale snapshot guard).
             candidates = by_last_season.get(last) or by_last_all.get(last, [])
+            # Double-barrelled DVV surname ("Chouikh-Barbez") vs single Firestore
+            # surname ("Chouikh") — fall back to each component.
+            if not candidates and re.search(r"[-\s]", last):
+                for comp in re.split(r"[-\s]+", last):
+                    hit = by_last_season.get(comp) or by_last_all.get(comp, [])
+                    if len(comp) >= 3 and hit:
+                        last = comp
+                        candidates = hit
+                        break
             taken = assigned[last]
 
             pick = None
@@ -1384,6 +1393,16 @@ def sync_players_available_from_brackets(force: bool = False) -> dict:
             for ln in info["players"]:
                 nln = normalize(ln)
                 candidates = candidates_for(nln)
+                # DVV Setzliste sometimes carries double-barrelled surnames
+                # ("Chouikh-Barbez", "Genevieve-Gardoque") where Firestore lists only
+                # one component ("Chouikh", "Gardoque"). Fall back to each component so
+                # these players still get matched (price + id) instead of dropped.
+                if not candidates and re.search(r"[-\s]", nln):
+                    for part in re.split(r"[-\s]+", nln):
+                        if len(part) >= 3 and candidates_for(part):
+                            nln = part
+                            candidates = candidates_for(part)
+                            break
                 already_used = assigned_by_last[nln]
 
                 # Pick priority:
